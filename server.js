@@ -192,6 +192,39 @@ setInterval(() => cleanupOldSessions(), 10 * 60 * 1000);
 // ==================== GREETING DETECTION ====================
 
 /**
+ * Check if the question is asking about license keys
+ */
+function isLicenseKeyQuery(question) {
+  const lowerQ = question.toLowerCase();
+  const licenseKeyPatterns = [
+    'license key',
+    'licensekey',
+    'license keys',
+    'calls per license',
+    'calls by license',
+    'how many calls for',
+    'count by license',
+    'group by license',
+    'breakdown by license',
+    'associated with',
+    'calls associated',
+    'for this license',
+    'with this license'
+  ];
+  
+  return licenseKeyPatterns.some(pattern => lowerQ.includes(pattern));
+}
+
+/**
+ * Extract license key from question if mentioned
+ */
+function extractLicenseKey(question) {
+  // Try to extract a license key pattern (base64-like strings)
+  const matches = question.match(/([A-Za-z0-9+/=]{20,})/);
+  return matches ? matches[1] : null;
+}
+
+/**
  * Check if the question is a simple greeting or casual conversation
  */
 function isGreeting(question) {
@@ -228,13 +261,14 @@ function getGreetingResponse() {
 function determineSystem(question) {
   const lowerQ = question.toLowerCase();
   
-  // AI Voice keywords
+  // AI Voice keywords (including license key queries)
   const aiVoiceKeywords = [
     'call', 'calls', 'voice', 'phone', 'patient', 'appointment', 
     'booked', 'cancelled', 'rescheduled', 'upsell', 'sentiment',
     'transcript', 'audio', 'follow-up', 'callback', 'cost of calls',
     'call duration', 'call summary', 'call records', 'inbound', 'outbound',
-    'thumbs up', 'thumbs down', 'voicemail'
+    'thumbs up', 'thumbs down', 'voicemail', 'license key', 'license keys',
+    'licensekey', 'how many calls', 'call count', 'calls per license'
   ];
   
   // TXQL keywords
@@ -920,6 +954,102 @@ function normalizeCall(raw, options = {}) {
   return normalized;
 }
 
+/**
+ * Group calls by license key and return statistics
+ */
+function groupCallsByLicenseKey(rawCalls) {
+  const grouped = {};
+  
+  rawCalls.forEach(call => {
+    const licenseKey = call.licenseKey || 'unknown';
+    
+    if (!grouped[licenseKey]) {
+      grouped[licenseKey] = {
+        licenseKey: licenseKey,
+        callCount: 0,
+        totalCost: 0,
+        totalDuration: 0,
+        calls: []
+      };
+    }
+    
+    grouped[licenseKey].callCount++;
+    grouped[licenseKey].totalCost += parseFloat(call.totalCost || 0);
+    grouped[licenseKey].totalDuration += parseInt(call.callDuration || call.duration_ms || 0);
+    grouped[licenseKey].calls.push(call);
+  });
+  
+  return grouped;
+}
+
+/**
+ * Build a summary of calls grouped by license key
+ */
+function buildLicenseKeySummary(rawCalls) {
+  if (!rawCalls || rawCalls.length === 0) {
+    return "No call data available.";
+  }
+  
+  const grouped = groupCallsByLicenseKey(rawCalls);
+  const licenseKeys = Object.keys(grouped);
+  
+  let summary = `📊 **Call Distribution by License Key**\n\n`;
+  summary += `Total License Keys: ${licenseKeys.length}\n`;
+  summary += `Total Calls: ${rawCalls.length}\n\n`;
+  
+  // Sort by call count (descending)
+  const sorted = Object.values(grouped).sort((a, b) => b.callCount - a.callCount);
+  
+  sorted.forEach((stats, index) => {
+    const keyPreview = stats.licenseKey.length > 20 
+      ? stats.licenseKey.substring(0, 20) + '...' 
+      : stats.licenseKey;
+    
+    summary += `${index + 1}. **License Key:** \`${keyPreview}\`\n`;
+    summary += `   - Calls: ${stats.callCount}\n`;
+    summary += `   - Total Cost: $${stats.totalCost.toFixed(2)}\n`;
+    summary += `   - Avg Duration: ${Math.round(stats.totalDuration / stats.callCount / 1000)}s\n\n`;
+  });
+  
+  return summary;
+}
+
+/**
+ * Find calls for a specific license key
+ */
+function getCallsForLicenseKey(rawCalls, targetLicenseKey) {
+  if (!rawCalls || rawCalls.length === 0) {
+    return {
+      found: false,
+      count: 0,
+      message: "No call data available."
+    };
+  }
+  
+  const calls = rawCalls.filter(call => call.licenseKey === targetLicenseKey);
+  
+  if (calls.length === 0) {
+    return {
+      found: false,
+      count: 0,
+      message: `No calls found for license key: ${targetLicenseKey}`
+    };
+  }
+  
+  const totalCost = calls.reduce((sum, c) => sum + (parseFloat(c.totalCost || 0)), 0);
+  const totalDuration = calls.reduce((sum, c) => sum + (parseInt(c.callDuration || c.duration_ms || 0)), 0);
+  
+  return {
+    found: true,
+    count: calls.length,
+    licenseKey: targetLicenseKey,
+    totalCost: totalCost,
+    avgDuration: Math.round(totalDuration / calls.length / 1000),
+    calls: calls,
+    message: `Found ${calls.length} call(s) for license key: ${targetLicenseKey.substring(0, 20)}...`
+  };
+}
+
 function buildConversationContext(calls) {
   if (!calls || calls.length === 0) {
     return "No call data available.";
@@ -1004,6 +1134,30 @@ function detectSingleDateFromQuestion(question) {
   const todayStr = getCurrentDateInTimezone(TIMEZONE);
   console.log(`📅 Current date in ${TIMEZONE}: ${todayStr}`);
 
+  // Check for explicit YYYY-MM-DD format first
+  const datePattern = /(\d{4})-(\d{2})-(\d{2})/g;
+  const matches = question.match(datePattern);
+  
+  if (matches && matches.length > 0) {
+    // If we find date patterns, use them
+    const dates = matches.filter(d => validateDateFormat(d));
+    
+    if (dates.length === 1) {
+      // Single date found
+      console.log(`   ✅ Detected explicit date: ${dates[0]}`);
+      return { startDate: dates[0], endDate: dates[0] };
+    } else if (dates.length === 2) {
+      // Date range found
+      console.log(`   ✅ Detected date range: ${dates[0]} to ${dates[1]}`);
+      return { startDate: dates[0], endDate: dates[1] };
+    } else if (dates.length > 2) {
+      // Use first and last
+      console.log(`   ✅ Detected multiple dates, using range: ${dates[0]} to ${dates[dates.length - 1]}`);
+      return { startDate: dates[0], endDate: dates[dates.length - 1] };
+    }
+  }
+
+  // Check for keyword-based dates
   if (lowerQ.includes('today')) {
     console.log(`   ✅ Detected "today" - using date: ${todayStr}`);
     return { startDate: todayStr, endDate: todayStr };
@@ -1203,6 +1357,10 @@ async function fetchCallDetails(startDate, endDate, includeTranscript = false, i
       console.log(`      - Calls with cost: ${hasCost}/${callData.length} (${Math.round(hasCost/callData.length*100)}%)`);
       console.log(`      - Calls with duration: ${hasDuration}/${callData.length} (${Math.round(hasDuration/callData.length*100)}%)`);
       
+      // Count unique license keys
+      const uniqueLicenseKeys = new Set(callData.map(c => c.licenseKey).filter(Boolean));
+      console.log(`      - Unique license keys: ${uniqueLicenseKeys.size}`);
+      
       const normalized = callData.map(call => 
         normalizeCall(call, { includeTranscript, includeAudio })
       );
@@ -1212,6 +1370,7 @@ async function fetchCallDetails(startDate, endDate, includeTranscript = false, i
       return {
         success: true,
         data: normalized,
+        rawData: callData, // Include raw data for license key analysis
         count: normalized.length,
         summary
       };
@@ -1384,6 +1543,126 @@ app.post('/api/chat', async (req, res) => {
         });
       }
 
+      // Check if this is a license key query FIRST (before OpenAI)
+      const isLicenseQuery = isLicenseKeyQuery(question);
+      const extractedKey = extractLicenseKey(question);
+      
+      if (isLicenseQuery) {
+        console.log(`🔑 Detected license key query (bypassing OpenAI)`);
+        
+        // Detect dates for the query
+        const prefilledDates = detectSingleDateFromQuestion(question);
+        const startDate = prefilledDates?.startDate || getCurrentDateInTimezone(TIMEZONE);
+        const endDate = prefilledDates?.endDate || getCurrentDateInTimezone(TIMEZONE);
+        
+        console.log(`   Date range: ${startDate} to ${endDate}`);
+        
+        // Fetch call data
+        const callResult = await fetchCallDetails(startDate, endDate, false, false);
+        
+        if (!callResult.success) {
+          return res.status(500).json({
+            success: false,
+            error: callResult.error,
+            friendlyError: callResult.friendlyError,
+            system: 'aivoice',
+            sessionId: session.sessionId
+          });
+        }
+        
+        if (!callResult.rawData || callResult.rawData.length === 0) {
+          const answer = `No calls found for the date range ${startDate} to ${endDate}.`;
+          
+          session.conversationHistory.push({
+            timestamp: new Date(),
+            question: question,
+            system: 'aivoice',
+            result: { success: true, answer: answer }
+          });
+          
+          return res.json({
+            success: true,
+            answer: answer,
+            callHistory: [],
+            system: 'aivoice',
+            sessionId: session.sessionId
+          });
+        }
+        
+        if (extractedKey) {
+          // User is asking about a specific license key
+          console.log(`   Looking for specific license key: ${extractedKey.substring(0, 20)}...`);
+          const licenseKeyResult = getCallsForLicenseKey(callResult.rawData, extractedKey);
+          
+          let answer;
+          if (licenseKeyResult.found) {
+            answer = `🔑 **License Key Analysis**\n\n`;
+            answer += `**License Key:** \`${licenseKeyResult.licenseKey.substring(0, 40)}...\`\n`;
+            answer += `**Date Range:** ${startDate} to ${endDate}\n\n`;
+            answer += `📊 **Statistics:**\n`;
+            answer += `- Total Calls: **${licenseKeyResult.count}**\n`;
+            answer += `- Total Cost: **$${licenseKeyResult.totalCost.toFixed(2)}**\n`;
+            answer += `- Average Duration: **${licenseKeyResult.avgDuration} seconds**\n`;
+          } else {
+            answer = `No calls found for license key \`${extractedKey.substring(0, 40)}...\` in the date range ${startDate} to ${endDate}.`;
+          }
+          
+          const result = {
+            success: true,
+            answer: answer,
+            callHistory: licenseKeyResult.calls || [],
+            licenseKeyStats: licenseKeyResult,
+            system: 'aivoice'
+          };
+          
+          session.conversationHistory.push({
+            timestamp: new Date(),
+            question: question,
+            system: 'aivoice',
+            result: result
+          });
+
+          return res.json({
+            success: true,
+            answer: result.answer,
+            callHistory: result.callHistory || [],
+            licenseKeyStats: result.licenseKeyStats,
+            system: 'aivoice',
+            sessionId: session.sessionId
+          });
+        } else {
+          // User is asking for a breakdown by all license keys
+          console.log(`   Generating license key breakdown`);
+          const licenseKeySummary = buildLicenseKeySummary(callResult.rawData);
+          const grouped = groupCallsByLicenseKey(callResult.rawData);
+          
+          const result = {
+            success: true,
+            answer: licenseKeySummary,
+            callHistory: callResult.data,
+            licenseKeyBreakdown: grouped,
+            system: 'aivoice'
+          };
+          
+          session.conversationHistory.push({
+            timestamp: new Date(),
+            question: question,
+            system: 'aivoice',
+            result: result
+          });
+
+          return res.json({
+            success: true,
+            answer: result.answer,
+            callHistory: result.callHistory || [],
+            licenseKeyBreakdown: result.licenseKeyBreakdown,
+            system: 'aivoice',
+            sessionId: session.sessionId
+          });
+        }
+      }
+
+      // Not a license key query, proceed with normal OpenAI flow
       const prefilledDates = detectSingleDateFromQuestion(question);
       const tools = [{
         type: 'function',
@@ -1451,6 +1730,7 @@ app.post('/api/chat', async (req, res) => {
           });
         }
 
+        // Build AI response context (license key queries already handled above)
         const aiToolPayload = {
           success: callResult.success,
           summary: callResult.summary,
@@ -1506,6 +1786,80 @@ app.post('/api/chat', async (req, res) => {
       error: 'An unexpected error occurred',
       friendlyError: 'Something went wrong. Please try again.',
       technicalError: error.message
+    });
+  }
+});
+
+// ==================== LEGACY ENDPOINTS ====================
+
+// New endpoint for license key analysis
+app.post('/api/aivoice/license-keys', async (req, res) => {
+  try {
+    const { startDate, endDate, licenseKey } = req.body;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'startDate and endDate are required'
+      });
+    }
+
+    console.log(`\n🔑 License Key Analysis Request`);
+    console.log(`   Date Range: ${startDate} to ${endDate}`);
+    if (licenseKey) {
+      console.log(`   Specific License Key: ${licenseKey.substring(0, 20)}...`);
+    }
+
+    const callResult = await fetchCallDetails(startDate, endDate, false, false);
+
+    if (!callResult.success) {
+      return res.status(500).json({
+        success: false,
+        error: callResult.error,
+        friendlyError: callResult.friendlyError
+      });
+    }
+
+    if (!callResult.rawData || callResult.rawData.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No calls found for the specified date range',
+        data: []
+      });
+    }
+
+    if (licenseKey) {
+      // Analyze specific license key
+      const result = getCallsForLicenseKey(callResult.rawData, licenseKey);
+      
+      return res.json({
+        success: result.found,
+        message: result.message,
+        licenseKey: licenseKey,
+        callCount: result.count,
+        totalCost: result.totalCost,
+        avgDuration: result.avgDuration,
+        calls: result.calls
+      });
+    } else {
+      // Return breakdown of all license keys
+      const grouped = groupCallsByLicenseKey(callResult.rawData);
+      const summary = buildLicenseKeySummary(callResult.rawData);
+      
+      return res.json({
+        success: true,
+        summary: summary,
+        breakdown: grouped,
+        totalCalls: callResult.rawData.length,
+        uniqueLicenseKeys: Object.keys(grouped).length
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error in license key analysis:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      message: error.message
     });
   }
 });
@@ -1676,11 +2030,14 @@ app.get('/api/health', (req, res) => {
 // Start server
 app.listen(PORT, async () => {
   console.log(`\n${'='.repeat(70)}`);
-  console.log(`🚀 UNIFIED CHATBOT SERVER (WITH SQL EXECUTION)`);
+  console.log(`🚀 UNIFIED CHATBOT SERVER (WITH SQL EXECUTION + LICENSE KEY ANALYSIS)`);
   console.log(`${'='.repeat(70)}`);
   console.log(`\n📡 Main Endpoint (Auto-routes to correct system):`);
   console.log(`   → POST http://localhost:${PORT}/api/chat`);
-  console.log(`\n✨ NEW: SQL Query Execution`);
+  console.log(`\n🔑 NEW: License Key Analysis`);
+  console.log(`   → POST http://localhost:${PORT}/api/aivoice/license-keys`);
+  console.log(`   Analyze call distribution by license key`);
+  console.log(`\n✨ SQL Query Execution`);
   console.log(`   TXQL returns SQL → Executes via query.8px.us → Shows actual results!`);
   console.log(`\n⏰ Timezone Configuration:`);
   console.log(`   Current timezone: ${TIMEZONE}`);
@@ -1688,7 +2045,7 @@ app.listen(PORT, async () => {
   console.log(`\n🔵 TXQL System (Database Queries):`);
   console.log(`   Questions: users, tables, orders, California, age, etc.`);
   console.log(`\n🟢 AI Voice System (Call Analysis):`);
-  console.log(`   Questions: calls, appointments, patients, sentiment, etc.`);
+  console.log(`   Questions: calls, appointments, patients, sentiment, license keys, etc.`);
   console.log(`\n📋 Legacy Endpoints:`);
   console.log(`   → POST http://localhost:${PORT}/api/txql/chat (TXQL only)`);
   console.log(`   → POST http://localhost:${PORT}/api/ask (AI Voice only)`);
