@@ -23,6 +23,10 @@ const QUERY_EXEC_KEY = "YjY4M2VlM2MtMGU5ZS00Y2MxLWI2OWEtYmM2ZmQ0";
 // OpenAI configuration
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
+// ==================== TIMEZONE CONFIGURATION ====================
+// Set your timezone here - defaults to Pacific Time
+const TIMEZONE = process.env.TIMEZONE || 'America/Los_Angeles';
+
 // ==================== TXQL HEALTH CHECK ====================
 
 /**
@@ -863,18 +867,46 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
 // I'm keeping them as-is from your original code
 
 function normalizeCall(raw, options = {}) {
+  // Helper function to safely extract nested values with fallbacks
+  const safeGet = (obj, paths, defaultValue = null) => {
+    // Accept both single path string or array of paths to try
+    const pathsToTry = Array.isArray(paths) ? paths : [paths];
+    
+    for (const path of pathsToTry) {
+      const keys = path.split('.');
+      let value = obj;
+      let found = true;
+      
+      for (const key of keys) {
+        if (value && typeof value === 'object' && key in value) {
+          value = value[key];
+        } else {
+          found = false;
+          break;
+        }
+      }
+      
+      if (found && value !== undefined && value !== null) {
+        return value;
+      }
+    }
+    
+    return defaultValue;
+  };
+
+  // Try multiple possible field names and structures for each property
   const normalized = {
-    id: raw.aiVoiceMetaId || raw.id,
-    callSessionID: raw.callSessionID,
-    patientNumber: raw.patientNumber,
-    patientName: raw.patientName,
-    dateTime: raw.dateTime,
-    callType: raw.callType,
-    outcome: raw.outcome,
-    sentiment: raw.sentiment,
-    duration: raw.duration,
-    cost: raw.cost,
-    summary: raw.summary
+    id: safeGet(raw, ['aiVoiceMetaId', 'id'], 0),
+    callSessionID: safeGet(raw, ['callSessionID', 'sessionId', 'meta.sessionId']),
+    patientNumber: safeGet(raw, ['patientNumber', 'patient.number'], '0'),
+    patientName: safeGet(raw, ['patientName', 'patient.name', 'meta.guestName']),
+    dateTime: safeGet(raw, ['dateTime', 'createdAt', 'startTime', 'meta.createdAt']),
+    callType: safeGet(raw, ['callType', 'type', 'meta.callType'], 'unknown'),
+    outcome: safeGet(raw, ['outcome', 'callStatus', 'meta.callStatus', 'flags.callSuccessful'], 'unknown'),
+    sentiment: safeGet(raw, ['sentiment', 'userSentiment', 'analysis.sentiments', 'analysis.userSentiment'], 'neutral'),
+    duration: safeGet(raw, ['duration', 'costs.durationSec', 'durationSec'], 0),
+    cost: safeGet(raw, ['cost', 'costs.total'], 0),
+    summary: safeGet(raw, ['summary'], 'No summary available')
   };
 
   if (options.includeTranscript && raw.transcript) {
@@ -921,56 +953,119 @@ ${Object.entries(sentiments).map(([k, v]) => `  - ${k}: ${v}`).join('\n')}
   `.trim();
 }
 
+/**
+ * Get current date in specified timezone
+ * @param {string} timezone - IANA timezone string (e.g., 'America/Los_Angeles')
+ * @returns {string} Date in YYYY-MM-DD format
+ */
+function getCurrentDateInTimezone(timezone = TIMEZONE) {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    });
+    
+    const parts = formatter.formatToParts(new Date());
+    const year = parts.find(p => p.type === 'year').value;
+    const month = parts.find(p => p.type === 'month').value;
+    const day = parts.find(p => p.type === 'day').value;
+    
+    return `${year}-${month}-${day}`;
+  } catch (error) {
+    console.error(`❌ Error getting date in timezone ${timezone}:`, error.message);
+    // Fallback to UTC
+    return new Date().toISOString().split('T')[0];
+  }
+}
+
+/**
+ * Validate date format (YYYY-MM-DD)
+ */
+function validateDateFormat(dateStr) {
+  const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  
+  const [, year, month, day] = match;
+  const date = new Date(dateStr);
+  const isValid = date instanceof Date && !isNaN(date) &&
+                  date.getUTCFullYear() === parseInt(year) &&
+                  date.getUTCMonth() + 1 === parseInt(month) &&
+                  date.getUTCDate() === parseInt(day);
+  
+  return isValid;
+}
+
 function detectSingleDateFromQuestion(question) {
-  const today = new Date();
   const lowerQ = question.toLowerCase();
+  
+  // Get current date in configured timezone
+  const todayStr = getCurrentDateInTimezone(TIMEZONE);
+  console.log(`📅 Current date in ${TIMEZONE}: ${todayStr}`);
 
   if (lowerQ.includes('today')) {
-    const dateStr = today.toISOString().split('T')[0];
-    return { startDate: dateStr, endDate: dateStr };
+    console.log(`   ✅ Detected "today" - using date: ${todayStr}`);
+    return { startDate: todayStr, endDate: todayStr };
   }
 
   if (lowerQ.includes('yesterday')) {
+    const today = new Date(todayStr);
     const yesterday = new Date(today);
     yesterday.setDate(yesterday.getDate() - 1);
-    const dateStr = yesterday.toISOString().split('T')[0];
-    return { startDate: dateStr, endDate: dateStr };
+    const yesterdayStr = yesterday.toISOString().split('T')[0];
+    console.log(`   ✅ Detected "yesterday" - using date: ${yesterdayStr}`);
+    return { startDate: yesterdayStr, endDate: yesterdayStr };
   }
 
   if (lowerQ.includes('this week')) {
+    const today = new Date(todayStr);
     const startOfWeek = new Date(today);
     startOfWeek.setDate(today.getDate() - today.getDay());
+    const startStr = startOfWeek.toISOString().split('T')[0];
+    console.log(`   ✅ Detected "this week" - using range: ${startStr} to ${todayStr}`);
     return {
-      startDate: startOfWeek.toISOString().split('T')[0],
-      endDate: today.toISOString().split('T')[0]
+      startDate: startStr,
+      endDate: todayStr
     };
   }
 
   if (lowerQ.includes('last week')) {
+    const today = new Date(todayStr);
     const lastWeekEnd = new Date(today);
     lastWeekEnd.setDate(today.getDate() - today.getDay() - 1);
     const lastWeekStart = new Date(lastWeekEnd);
     lastWeekStart.setDate(lastWeekEnd.getDate() - 6);
+    const startStr = lastWeekStart.toISOString().split('T')[0];
+    const endStr = lastWeekEnd.toISOString().split('T')[0];
+    console.log(`   ✅ Detected "last week" - using range: ${startStr} to ${endStr}`);
     return {
-      startDate: lastWeekStart.toISOString().split('T')[0],
-      endDate: lastWeekEnd.toISOString().split('T')[0]
+      startDate: startStr,
+      endDate: endStr
     };
   }
 
   if (lowerQ.includes('this month')) {
+    const today = new Date(todayStr);
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    const startStr = startOfMonth.toISOString().split('T')[0];
+    console.log(`   ✅ Detected "this month" - using range: ${startStr} to ${todayStr}`);
     return {
-      startDate: startOfMonth.toISOString().split('T')[0],
-      endDate: today.toISOString().split('T')[0]
+      startDate: startStr,
+      endDate: todayStr
     };
   }
 
   if (lowerQ.includes('last month')) {
+    const today = new Date(todayStr);
     const lastMonthStart = new Date(today.getFullYear(), today.getMonth() - 1, 1);
     const lastMonthEnd = new Date(today.getFullYear(), today.getMonth(), 0);
+    const startStr = lastMonthStart.toISOString().split('T')[0];
+    const endStr = lastMonthEnd.toISOString().split('T')[0];
+    console.log(`   ✅ Detected "last month" - using range: ${startStr} to ${endStr}`);
     return {
-      startDate: lastMonthStart.toISOString().split('T')[0],
-      endDate: lastMonthEnd.toISOString().split('T')[0]
+      startDate: startStr,
+      endDate: endStr
     };
   }
 
@@ -979,6 +1074,24 @@ function detectSingleDateFromQuestion(question) {
 
 async function fetchCallDetails(startDate, endDate, includeTranscript = false, includeAudio = false) {
   try {
+    // Validate dates before making API call
+    if (!validateDateFormat(startDate) || !validateDateFormat(endDate)) {
+      console.error(`   ❌ Date validation failed`);
+      console.error(`      Start: ${startDate}`);
+      console.error(`      End: ${endDate}`);
+      
+      return {
+        success: false,
+        error: 'Invalid date format',
+        friendlyError: `❌ Invalid date format. Dates must be YYYY-MM-DD.\n\nReceived:\n- Start: ${startDate}\n- End: ${endDate}`,
+        data: [],
+        count: 0,
+        summary: 'Invalid date format provided.'
+      };
+    }
+    
+    console.log(`   ✅ Date validation passed`);
+    
     const url = `${BASE_URL}/api/config/get/aivoice/detail`;
     
     console.log(`\n🔍 Fetching AI Voice call details...`);
@@ -1060,6 +1173,35 @@ async function fetchCallDetails(startDate, endDate, includeTranscript = false, i
 
     if (callData.length > 0) {
       console.log(`   ✅ Successfully fetched ${callData.length} calls`);
+      
+      // Log sample structure for debugging
+      if (callData[0]) {
+        const sampleJson = JSON.stringify(callData[0], null, 2);
+        const preview = sampleJson.length > 500 ? sampleJson.substring(0, 500) + '...' : sampleJson;
+        console.log(`   📊 Sample call structure:`);
+        console.log(preview);
+        console.log(`   🔍 Available fields:`, Object.keys(callData[0]).join(', '));
+      }
+      
+      // Analyze data quality before normalization
+      const hasOutcome = callData.filter(c => 
+        c.outcome || c.callStatus || c.meta?.callStatus
+      ).length;
+      const hasSentiment = callData.filter(c => 
+        c.sentiment || c.userSentiment || c.analysis?.sentiments || c.analysis?.userSentiment
+      ).length;
+      const hasCost = callData.filter(c => 
+        c.cost || c.costs?.total || (typeof c.costs?.total === 'number')
+      ).length;
+      const hasDuration = callData.filter(c =>
+        c.duration || c.costs?.durationSec || c.durationSec
+      ).length;
+      
+      console.log(`   📈 Data quality check:`);
+      console.log(`      - Calls with outcome: ${hasOutcome}/${callData.length} (${Math.round(hasOutcome/callData.length*100)}%)`);
+      console.log(`      - Calls with sentiment: ${hasSentiment}/${callData.length} (${Math.round(hasSentiment/callData.length*100)}%)`);
+      console.log(`      - Calls with cost: ${hasCost}/${callData.length} (${Math.round(hasCost/callData.length*100)}%)`);
+      console.log(`      - Calls with duration: ${hasDuration}/${callData.length} (${Math.round(hasDuration/callData.length*100)}%)`);
       
       const normalized = callData.map(call => 
         normalizeCall(call, { includeTranscript, includeAudio })
@@ -1540,6 +1682,9 @@ app.listen(PORT, async () => {
   console.log(`   → POST http://localhost:${PORT}/api/chat`);
   console.log(`\n✨ NEW: SQL Query Execution`);
   console.log(`   TXQL returns SQL → Executes via query.8px.us → Shows actual results!`);
+  console.log(`\n⏰ Timezone Configuration:`);
+  console.log(`   Current timezone: ${TIMEZONE}`);
+  console.log(`   Current date: ${getCurrentDateInTimezone(TIMEZONE)}`);
   console.log(`\n🔵 TXQL System (Database Queries):`);
   console.log(`   Questions: users, tables, orders, California, age, etc.`);
   console.log(`\n🟢 AI Voice System (Call Analysis):`);
