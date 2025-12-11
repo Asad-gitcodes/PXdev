@@ -4,6 +4,112 @@
 const axios = require('axios');
 const config = require('./config');
 
+// ==================== LICENSE KEY PREPROCESSOR ====================
+
+/**
+ * Preprocesses user question to detect and extract license key pattern
+ * Pattern: "In <license-key> <actual-query>"
+ * 
+ * @param {string} question - The user's question
+ * @returns {object} - { hasLicenseKey, licenseKey, actualQuery, originalQuestion }
+ */
+function preprocessLicenseKeyFromQuestion(question) {
+  if (!question || typeof question !== 'string') {
+    return {
+      hasLicenseKey: false,
+      licenseKey: null,
+      actualQuery: question,
+      originalQuestion: question
+    };
+  }
+
+  // Pattern: "In <license-key> <rest-of-query>"
+  // License key pattern: base64-like string (30+ chars of A-Za-z0-9+/=)
+  const licenseKeyPattern = /^In\s+([A-Za-z0-9+/=]{30,})\s+(.+)$/i;
+  
+  const match = question.match(licenseKeyPattern);
+  
+  if (match) {
+    const licenseKey = match[1].trim();
+    const actualQuery = match[2].trim();
+    
+    console.log(`\n🔑 LICENSE KEY DETECTED IN QUESTION:`);
+    console.log(`   📋 Original: "${question}"`);
+    console.log(`   🔑 License Key: ${licenseKey.substring(0, 40)}...`);
+    console.log(`   💬 Actual Query: "${actualQuery}"`);
+    
+    return {
+      hasLicenseKey: true,
+      licenseKey: licenseKey,
+      actualQuery: actualQuery,
+      originalQuestion: question
+    };
+  }
+  
+  console.log(`   ℹ️  No license key pattern detected - processing as normal query`);
+  
+  return {
+    hasLicenseKey: false,
+    licenseKey: null,
+    actualQuery: question,
+    originalQuestion: question
+  };
+}
+
+// ==================== TXQL LICENSE KEY PREPROCESSOR ====================
+
+/**
+ * Preprocess TXQL questions to detect license key pattern
+ * Pattern: "In <license-key> <actual-query>"
+ * 
+ * CRITICAL: The extracted key is used to SELECT which database to query
+ * This is DIFFERENT from AI Voice where key is used for filtering
+ * 
+ * @param {string} question - The user's question
+ * @returns {object} - { hasTXQLKey, txqlLicenseKey, actualQuery, originalQuestion }
+ */
+function preprocessTXQLLicenseKey(question) {
+  if (!question || typeof question !== 'string') {
+    return {
+      hasTXQLKey: false,
+      txqlLicenseKey: null,
+      actualQuery: question,
+      originalQuestion: question
+    };
+  }
+
+  // Pattern: "In <license-key> <actual-query>"
+  // License key: 30+ base64-like characters
+  const pattern = /^In\s+([A-Za-z0-9+/=]{30,})\s+(.+)$/i;
+  const match = question.match(pattern);
+  
+  if (match) {
+    const licenseKey = match[1].trim();
+    const actualQuery = match[2].trim();
+    
+    console.log(`\n🔑 TXQL LICENSE KEY DETECTED IN QUESTION:`);
+    console.log(`   License Key: ${licenseKey.substring(0, 40)}...`);
+    console.log(`   Actual Query: "${actualQuery}"`);
+    console.log(`   ⚠️  IMPORTANT: This key will be used to SELECT which database to query!`);
+    
+    return {
+      hasTXQLKey: true,
+      txqlLicenseKey: licenseKey,
+      actualQuery: actualQuery,
+      originalQuestion: question
+    };
+  }
+  
+  return {
+    hasTXQLKey: false,
+    txqlLicenseKey: null,
+    actualQuery: question,
+    originalQuestion: question
+  };
+}
+
+// ==================== CONNECTION TESTS ====================
+
 async function testTXQLConnection() {
   const TXQL_API_URL = 'https://txql.8px.us/api/sql/query';
   console.log(`\nðŸ” Testing TXQL service connectivity...`);
@@ -504,20 +610,33 @@ function extractSQLFromTXQL(txqlResponse) {
 }
 
 /**
+/**
  * Execute SQL query using the query execution endpoint
+ * @param {string} sqlQuery - The SQL query to execute
+ * @param {string|null} customKey - Optional custom license key for database selection
  */
-async function executeSQL(sqlQuery) {
+async function executeSQL(sqlQuery, customKey = null) {
   try {
-    console.log(`ðŸ” Executing SQL query...`);
+    console.log(`🔐 Executing SQL query...`);
     console.log(`   Full Query:\n${sqlQuery}`);
     console.log(`   Endpoint: ${config.QUERY_EXEC_URL}`);
     
+    // Use custom key if provided, otherwise use default
+    const queryKey = customKey || config.QUERY_EXEC_KEY;
+    
+    if (customKey) {
+      console.log(`   🆕 Using CUSTOM license key: ${customKey.substring(0, 40)}...`);
+      console.log(`   ⚠️  This will query the database for THIS specific practice!`);
+    } else {
+      console.log(`   ℹ️  Using DEFAULT license key: ${queryKey.substring(0, 40)}...`);
+    }
+    
     const payload = {
-      key: config.QUERY_EXEC_KEY,
+      key: queryKey,
       query: sqlQuery.trim()
     };
     
-    console.log(`   Payload:`, JSON.stringify(payload, null, 2));
+    console.log(`   Payload (key hidden):`, JSON.stringify({ ...payload, key: payload.key.substring(0, 20) + '...' }, null, 2));
     
     const response = await axios.post(config.QUERY_EXEC_URL, payload, {
       headers: {
@@ -1487,6 +1606,361 @@ function formatChartLabel(val) {
 /**
  * Generate creative, professional data display
  */
+// ==================== INTELLIGENT TXQL ENHANCEMENT SYSTEM ====================
+
+/**
+ * Extract SQL entities from user questions
+ * Helps TXQL understand what the user really wants
+ */
+function extractSQLEntities(question) {
+  const lowerQ = question.toLowerCase();
+  
+  const entities = {
+    // Patient identification
+    patientName: null,      // "John Doe" -> need to look up PatNum
+    patientNum: null,       // Direct PatNum reference
+    
+    // Date filters
+    dateRange: null,        // { startDate, endDate }
+    dateContext: null,      // 'today', 'yesterday', 'this week', etc.
+    
+    // Status filters
+    isActive: null,         // Filter for active records
+    includeDeleted: false,  // Whether to include deleted records
+    
+    // Limit/pagination
+    limit: null,            // Number of results to return
+    needsLimit: true,       // Should we add a LIMIT?
+    
+    // Common filters
+    state: null,            // US state
+    status: null,           // Generic status field
+    
+    // Table hints
+    tableType: null         // 'patient', 'appointment', 'payment', etc.
+  };
+  
+  // ========== Patient Name Extraction ==========
+  // Look for "for [Name]" or "patient [Name]"
+  const namePatterns = [
+    /\b(?:for|patient|of)\s+([A-Z][a-z]+\s+[A-Z][a-z]+)\b/,
+    /\b([A-Z][a-z]+\s+[A-Z][a-z]+)'s?\b/,
+  ];
+  
+  for (const pattern of namePatterns) {
+    const match = question.match(pattern);
+    if (match) {
+      entities.patientName = match[1];
+      console.log(`   👤 Detected patient name: ${entities.patientName}`);
+      break;
+    }
+  }
+  
+  // ========== PatNum Extraction ==========
+  const patNumMatch = lowerQ.match(/\bpatnum\s*=?\s*(\d+)/i);
+  if (patNumMatch) {
+    entities.patientNum = parseInt(patNumMatch[1]);
+    console.log(`   🔢 Detected PatNum: ${entities.patientNum}`);
+  }
+  
+  // ========== Date Range Detection ==========
+  entities.dateRange = config.detectSingleDateFromQuestion(question);
+  
+  if (lowerQ.includes('today')) {
+    entities.dateContext = 'today';
+  } else if (lowerQ.includes('yesterday')) {
+    entities.dateContext = 'yesterday';
+  } else if (lowerQ.match(/this week|last week/)) {
+    entities.dateContext = 'week';
+  } else if (lowerQ.match(/this month|last month/)) {
+    entities.dateContext = 'month';
+  }
+  
+  if (entities.dateRange) {
+    console.log(`   📅 Date range: ${entities.dateRange.startDate} to ${entities.dateRange.endDate}`);
+  }
+  
+  // ========== Active/Deleted Filters ==========
+  if (lowerQ.match(/\bactive\b/)) {
+    entities.isActive = true;
+    console.log(`   ✅ Filter: Active only`);
+  }
+  
+  if (lowerQ.match(/\bdeleted\b/)) {
+    entities.includeDeleted = true;
+    console.log(`   🗑️ Include deleted records`);
+  }
+  
+  // ========== State Filter ==========
+  const statePattern = /\b(Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|CA|NY|TX|FL|IL)\b/i;
+  const stateMatch = question.match(statePattern);
+  if (stateMatch) {
+    entities.state = stateMatch[1];
+    console.log(`   🗺️ State filter: ${entities.state}`);
+  }
+  
+  // ========== Table Type Detection ==========
+  const tableKeywords = {
+    patient: ['patient', 'patients'],
+    appointment: ['appointment', 'appointments', 'appt', 'schedule'],
+    payment: ['payment', 'payments', 'transaction', 'transactions'],
+    procedure: ['procedure', 'procedures', 'treatment', 'treatments'],
+    note: ['note', 'notes', 'comment', 'comments']
+  };
+  
+  for (const [table, keywords] of Object.entries(tableKeywords)) {
+    if (keywords.some(kw => lowerQ.includes(kw))) {
+      entities.tableType = table;
+      console.log(`   📋 Table type: ${table}`);
+      break;
+    }
+  }
+  
+  // ========== Limit Detection ==========
+  const limitMatch = lowerQ.match(/\b(?:top|first|limit)\s+(\d+)/);
+  if (limitMatch) {
+    entities.limit = parseInt(limitMatch[1]);
+    entities.needsLimit = false; // User specified, don't auto-add
+    console.log(`   🔢 User-specified limit: ${entities.limit}`);
+  } else if (lowerQ.match(/\ball\b/)) {
+    entities.needsLimit = false; // User wants all results
+    console.log(`   ∞ User requested all results`);
+  }
+  
+  return entities;
+}
+
+/**
+ * Enhance SQL query with smart defaults and safety checks
+ */
+function enhanceSQLQuery(sqlQuery, entities) {
+  let enhanced = sqlQuery.trim();
+  const upperQuery = enhanced.toUpperCase();
+  
+  console.log(`\n   🔧 Enhancing SQL query...`);
+  console.log(`   📝 Original: ${enhanced.substring(0, 100)}...`);
+  
+  // ========== 1. Add LIMIT if missing (SAFETY) ==========
+  if (entities.needsLimit && !upperQuery.includes('LIMIT')) {
+    const defaultLimit = entities.limit || 100;
+    
+    // Remove trailing semicolon if present
+    if (enhanced.endsWith(';')) {
+      enhanced = enhanced.slice(0, -1).trim();
+    }
+    
+    enhanced += ` LIMIT ${defaultLimit}`;
+    console.log(`   ✅ Added safety LIMIT ${defaultLimit}`);
+  }
+  
+  // ========== 2. Add Active Filter if requested ==========
+  if (entities.isActive && !upperQuery.includes('ISACTIVE')) {
+    const hasWhere = upperQuery.includes('WHERE');
+    
+    if (hasWhere) {
+      // Find the WHERE clause and add condition
+      enhanced = enhanced.replace(/WHERE/i, 'WHERE IsActive = 1 AND');
+    } else {
+      // Add WHERE clause before ORDER BY, LIMIT, or at the end
+      const insertPoint = enhanced.search(/\s+(ORDER BY|LIMIT)/i);
+      if (insertPoint !== -1) {
+        enhanced = enhanced.slice(0, insertPoint) + ' WHERE IsActive = 1' + enhanced.slice(insertPoint);
+      } else {
+        // Remove LIMIT temporarily if it exists
+        const limitMatch = enhanced.match(/\s+LIMIT\s+\d+$/i);
+        if (limitMatch) {
+          const limitClause = limitMatch[0];
+          enhanced = enhanced.slice(0, -limitClause.length) + ' WHERE IsActive = 1' + limitClause;
+        } else {
+          enhanced += ' WHERE IsActive = 1';
+        }
+      }
+    }
+    console.log(`   ✅ Added IsActive = 1 filter`);
+  }
+  
+  // ========== 3. Exclude Deleted Records (unless explicitly requested) ==========
+  if (!entities.includeDeleted && (upperQuery.includes('FROM PATIENT') || upperQuery.includes('FROM `PATIENT`'))) {
+    const hasWhere = upperQuery.includes('WHERE');
+    
+    // Common deleted record patterns
+    const deletedCondition = "(PatStatus != 2)"; // PatStatus 2 = deleted
+    
+    if (hasWhere && !upperQuery.includes('PATSTATUS')) {
+      enhanced = enhanced.replace(/WHERE/i, `WHERE ${deletedCondition} AND`);
+      console.log(`   ✅ Added deleted record filter (PatStatus != 2)`);
+    } else if (!hasWhere && !upperQuery.includes('PATSTATUS')) {
+      const insertPoint = enhanced.search(/\s+(ORDER BY|LIMIT)/i);
+      if (insertPoint !== -1) {
+        enhanced = enhanced.slice(0, insertPoint) + ` WHERE ${deletedCondition}` + enhanced.slice(insertPoint);
+      } else {
+        // Remove LIMIT temporarily if it exists
+        const limitMatch = enhanced.match(/\s+LIMIT\s+\d+$/i);
+        if (limitMatch) {
+          const limitClause = limitMatch[0];
+          enhanced = enhanced.slice(0, -limitClause.length) + ` WHERE ${deletedCondition}` + limitClause;
+        } else {
+          enhanced += ` WHERE ${deletedCondition}`;
+        }
+      }
+      console.log(`   ✅ Added deleted record filter (PatStatus != 2)`);
+    }
+  }
+  
+  // ========== 4. Add Date Range Filter ==========
+  if (entities.dateRange) {
+    // Try to find date column in query
+    const dateColumns = ['AptDateTime', 'ProcDate', 'DateEntry', 'CreatedDate', 'ModifiedDate', 'CommDateTime'];
+    
+    let dateColumn = null;
+    for (const col of dateColumns) {
+      if (upperQuery.includes(col.toUpperCase())) {
+        dateColumn = col;
+        break;
+      }
+    }
+    
+    if (dateColumn) {
+      const hasWhere = upperQuery.includes('WHERE');
+      const dateFilter = `DATE(${dateColumn}) BETWEEN '${entities.dateRange.startDate}' AND '${entities.dateRange.endDate}'`;
+      
+      if (hasWhere) {
+        enhanced = enhanced.replace(/WHERE/i, `WHERE ${dateFilter} AND`);
+      } else {
+        const insertPoint = enhanced.search(/\s+(ORDER BY|LIMIT)/i);
+        if (insertPoint !== -1) {
+          enhanced = enhanced.slice(0, insertPoint) + ` WHERE ${dateFilter}` + enhanced.slice(insertPoint);
+        } else {
+          // Remove LIMIT temporarily if it exists
+          const limitMatch = enhanced.match(/\s+LIMIT\s+\d+$/i);
+          if (limitMatch) {
+            const limitClause = limitMatch[0];
+            enhanced = enhanced.slice(0, -limitClause.length) + ` WHERE ${dateFilter}` + limitClause;
+          } else {
+            enhanced += ` WHERE ${dateFilter}`;
+          }
+        }
+      }
+      console.log(`   ✅ Added date range filter on ${dateColumn}`);
+    }
+  }
+  
+  // ========== 5. Add State Filter ==========
+  if (entities.state) {
+    const hasWhere = upperQuery.includes('WHERE');
+    const stateFilter = `State = '${entities.state}'`;
+    
+    if (hasWhere) {
+      enhanced = enhanced.replace(/WHERE/i, `WHERE ${stateFilter} AND`);
+    } else {
+      const insertPoint = enhanced.search(/\s+(ORDER BY|LIMIT)/i);
+      if (insertPoint !== -1) {
+        enhanced = enhanced.slice(0, insertPoint) + ` WHERE ${stateFilter}` + enhanced.slice(insertPoint);
+      } else {
+        // Remove LIMIT temporarily if it exists
+        const limitMatch = enhanced.match(/\s+LIMIT\s+\d+$/i);
+        if (limitMatch) {
+          const limitClause = limitMatch[0];
+          enhanced = enhanced.slice(0, -limitClause.length) + ` WHERE ${stateFilter}` + limitClause;
+        } else {
+          enhanced += ` WHERE ${stateFilter}`;
+        }
+      }
+    }
+    console.log(`   ✅ Added state filter: ${entities.state}`);
+  }
+  
+  console.log(`   📝 Enhanced: ${enhanced.substring(0, 150)}...`);
+  return enhanced;
+}
+
+/**
+ * Look up PatNum for a patient name
+ */
+async function lookupPatientNumber(patientName) {
+  console.log(`   🔍 Looking up PatNum for: ${patientName}`);
+  
+  try {
+    // Split name into parts
+    const nameParts = patientName.trim().split(/\s+/);
+    const firstName = nameParts[0];
+    const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+    
+    // Build search query
+    let searchQuery = `SELECT PatNum, LName, FName FROM patient WHERE `;
+    
+    if (lastName) {
+      searchQuery += `LName LIKE '%${lastName}%' AND FName LIKE '%${firstName}%'`;
+    } else {
+      searchQuery += `(LName LIKE '%${firstName}%' OR FName LIKE '%${firstName}%')`;
+    }
+    
+    searchQuery += ` AND PatStatus != 2 LIMIT 10`;
+    
+    // Execute lookup query
+    const result = await executeSQL(searchQuery);
+    
+    if (result.success && result.data && result.data.data && result.data.data.length > 0) {
+      const patients = result.data.data;
+      console.log(`   ✅ Found ${patients.length} matching patient(s)`);
+      
+      if (patients.length === 1) {
+        return {
+          found: true,
+          patNum: patients[0].PatNum,
+          name: `${patients[0].FName} ${patients[0].LName}`,
+          matches: patients
+        };
+      } else {
+        return {
+          found: true,
+          multiple: true,
+          matches: patients,
+          message: `Found ${patients.length} patients matching "${patientName}"`
+        };
+      }
+    } else {
+      return {
+        found: false,
+        message: `No patient found matching "${patientName}"`
+      };
+    }
+  } catch (error) {
+    console.error(`   ❌ Error looking up patient: ${error.message}`);
+    return {
+      found: false,
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Substitute patient name with PatNum in query
+ */
+function substitutePatientNumber(sqlQuery, patientName, patNum) {
+  console.log(`   🔄 Substituting "${patientName}" with PatNum = ${patNum}`);
+  
+  let modified = sqlQuery;
+  
+  // Pattern 1: WHERE ... LIKE '%Name%'
+  const likePattern = new RegExp(`LIKE\\s+['"]%?${patientName}%?['"]`, 'gi');
+  modified = modified.replace(likePattern, `= ${patNum}`);
+  
+  // Pattern 2: WHERE Name = 'John Doe'
+  const equalPattern = new RegExp(`=\\s+['"]${patientName}['"]`, 'gi');
+  modified = modified.replace(equalPattern, `= ${patNum}`);
+  
+  // Pattern 3: Just the name in quotes
+  const quotedPattern = new RegExp(`['"]${patientName}['"]`, 'gi');
+  modified = modified.replace(quotedPattern, patNum.toString());
+  
+  // Pattern 4: Column name containing the name
+  const columnPattern = new RegExp(`(FName|LName|PatientName)\\s*=\\s*['"]${patientName}['"]`, 'gi');
+  modified = modified.replace(columnPattern, `PatNum = ${patNum}`);
+  
+  return modified;
+}
+
 // ==================== TXQL FUNCTION (MODIFIED) ====================
 
 /**
@@ -1559,7 +2033,298 @@ function ensureQueryHasLimit(query, defaultLimit = 1000) {
   return modifiedQuery;
 }
 
-async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
+
+// ==================== INTELLIGENT TXQL ENHANCEMENT SYSTEM ====================
+
+/**
+ * Extract SQL entities from user questions
+ */
+function extractSQLEntities(question) {
+  const lowerQ = question.toLowerCase();
+  
+  const entities = {
+    patientName: null,
+    patientNum: null,
+    dateRange: null,
+    dateContext: null,
+    isActive: null,
+    includeDeleted: false,
+    limit: null,
+    needsLimit: true,
+    state: null,
+    tableType: null
+  };
+  
+  // Patient Name Extraction
+  const namePatterns = [
+    /\b(?:for|patient|of)\s+([A-Z][a-z]+\s+[A-Z][a-z]+)\b/,
+    /\b([A-Z][a-z]+\s+[A-Z][a-z]+)'s?\b/,
+  ];
+  
+  for (const pattern of namePatterns) {
+    const match = question.match(pattern);
+    if (match) {
+      entities.patientName = match[1];
+      console.log(`   👤 Detected patient name: ${entities.patientName}`);
+      break;
+    }
+  }
+  
+  // PatNum Extraction
+  const patNumMatch = lowerQ.match(/\bpatnum\s*=?\s*(\d+)/i);
+  if (patNumMatch) {
+    entities.patientNum = parseInt(patNumMatch[1]);
+    console.log(`   🔢 Detected PatNum: ${entities.patientNum}`);
+  }
+  
+  // Date Range Detection
+  entities.dateRange = config.detectSingleDateFromQuestion(question);
+  if (lowerQ.includes('today')) entities.dateContext = 'today';
+  else if (lowerQ.includes('yesterday')) entities.dateContext = 'yesterday';
+  else if (lowerQ.match(/this week|last week/)) entities.dateContext = 'week';
+  else if (lowerQ.match(/this month|last month/)) entities.dateContext = 'month';
+  
+  if (entities.dateRange) {
+    console.log(`   📅 Date range: ${entities.dateRange.startDate} to ${entities.dateRange.endDate}`);
+  }
+  
+  // Active/Deleted Filters
+  if (lowerQ.match(/\bactive\b/)) {
+    entities.isActive = true;
+    console.log(`   ✅ Filter: Active only`);
+  }
+  
+  if (lowerQ.match(/\bdeleted\b/)) {
+    entities.includeDeleted = true;
+    console.log(`   🗑️ Include deleted records`);
+  }
+  
+  // State Filter
+  const statePattern = /\b(Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|CA|NY|TX|FL|IL)\b/i;
+  const stateMatch = question.match(statePattern);
+  if (stateMatch) {
+    entities.state = stateMatch[1];
+    console.log(`   🗺️ State filter: ${entities.state}`);
+  }
+  
+  // Table Type Detection
+  const tableKeywords = {
+    patient: ['patient', 'patients'],
+    appointment: ['appointment', 'appointments', 'appt', 'schedule'],
+    payment: ['payment', 'payments', 'transaction', 'transactions'],
+    procedure: ['procedure', 'procedures', 'treatment', 'treatments'],
+    note: ['note', 'notes', 'comment', 'comments']
+  };
+  
+  for (const [table, keywords] of Object.entries(tableKeywords)) {
+    if (keywords.some(kw => lowerQ.includes(kw))) {
+      entities.tableType = table;
+      console.log(`   📋 Table type: ${table}`);
+      break;
+    }
+  }
+  
+  // Limit Detection
+  const limitMatch = lowerQ.match(/\b(?:top|first|limit)\s+(\d+)/);
+  if (limitMatch) {
+    entities.limit = parseInt(limitMatch[1]);
+    entities.needsLimit = false;
+    console.log(`   🔢 User-specified limit: ${entities.limit}`);
+  } else if (lowerQ.match(/\ball\b/)) {
+    entities.needsLimit = false;
+    console.log(`   ∞ User requested all results`);
+  }
+  
+  return entities;
+}
+
+/**
+ * Enhance SQL query with smart defaults
+ */
+function enhanceSQLQuery(sqlQuery, entities) {
+  let enhanced = sqlQuery.trim();
+  const upperQuery = enhanced.toUpperCase();
+  
+  console.log(`\n   🔧 Enhancing SQL query...`);
+  console.log(`   📝 Original: ${enhanced.substring(0, 100)}...`);
+  
+  // Add LIMIT if missing
+  if (entities.needsLimit && !upperQuery.includes('LIMIT')) {
+    const defaultLimit = entities.limit || 100;
+    if (enhanced.endsWith(';')) enhanced = enhanced.slice(0, -1).trim();
+    enhanced += ` LIMIT ${defaultLimit}`;
+    console.log(`   ✅ Added safety LIMIT ${defaultLimit}`);
+  }
+  
+  // Add Active Filter
+  if (entities.isActive && !upperQuery.includes('ISACTIVE')) {
+    const hasWhere = upperQuery.includes('WHERE');
+    if (hasWhere) {
+      enhanced = enhanced.replace(/WHERE/i, 'WHERE IsActive = 1 AND');
+    } else {
+      const insertPoint = enhanced.search(/\s+(ORDER BY|LIMIT)/i);
+      if (insertPoint !== -1) {
+        enhanced = enhanced.slice(0, insertPoint) + ' WHERE IsActive = 1' + enhanced.slice(insertPoint);
+      } else {
+        enhanced += ' WHERE IsActive = 1';
+      }
+    }
+    console.log(`   ✅ Added IsActive = 1 filter`);
+  }
+  
+  // Exclude Deleted Records
+  if (!entities.includeDeleted && (upperQuery.includes('FROM PATIENT') || upperQuery.includes('FROM `PATIENT`'))) {
+    const hasWhere = upperQuery.includes('WHERE');
+    const deletedCondition = "(PatStatus != 2)";
+    
+    if (hasWhere && !upperQuery.includes('PATSTATUS')) {
+      enhanced = enhanced.replace(/WHERE/i, `WHERE ${deletedCondition} AND`);
+      console.log(`   ✅ Added deleted record filter (PatStatus != 2)`);
+    } else if (!hasWhere && !upperQuery.includes('PATSTATUS')) {
+      const insertPoint = enhanced.search(/\s+(ORDER BY|LIMIT)/i);
+      if (insertPoint !== -1) {
+        enhanced = enhanced.slice(0, insertPoint) + ` WHERE ${deletedCondition}` + enhanced.slice(insertPoint);
+      } else {
+        enhanced += ` WHERE ${deletedCondition}`;
+      }
+      console.log(`   ✅ Added deleted record filter (PatStatus != 2)`);
+    }
+  }
+  
+  // Add Date Range Filter
+  if (entities.dateRange) {
+    const dateColumns = ['AptDateTime', 'ProcDate', 'DateEntry', 'CreatedDate', 'ModifiedDate', 'CommDateTime'];
+    let dateColumn = null;
+    for (const col of dateColumns) {
+      if (upperQuery.includes(col.toUpperCase())) {
+        dateColumn = col;
+        break;
+      }
+    }
+    
+    if (dateColumn) {
+      const hasWhere = upperQuery.includes('WHERE');
+      const dateFilter = `DATE(${dateColumn}) BETWEEN '${entities.dateRange.startDate}' AND '${entities.dateRange.endDate}'`;
+      
+      if (hasWhere) {
+        enhanced = enhanced.replace(/WHERE/i, `WHERE ${dateFilter} AND`);
+      } else {
+        const insertPoint = enhanced.search(/\s+(ORDER BY|LIMIT)/i);
+        if (insertPoint !== -1) {
+          enhanced = enhanced.slice(0, insertPoint) + ` WHERE ${dateFilter}` + enhanced.slice(insertPoint);
+        } else {
+          enhanced += ` WHERE ${dateFilter}`;
+        }
+      }
+      console.log(`   ✅ Added date range filter on ${dateColumn}`);
+    }
+  }
+  
+  // Add State Filter
+  if (entities.state) {
+    const hasWhere = upperQuery.includes('WHERE');
+    const stateFilter = `State = '${entities.state}'`;
+    
+    if (hasWhere) {
+      enhanced = enhanced.replace(/WHERE/i, `WHERE ${stateFilter} AND`);
+    } else {
+      const insertPoint = enhanced.search(/\s+(ORDER BY|LIMIT)/i);
+      if (insertPoint !== -1) {
+        enhanced = enhanced.slice(0, insertPoint) + ` WHERE ${stateFilter}` + enhanced.slice(insertPoint);
+      } else {
+        enhanced += ` WHERE ${stateFilter}`;
+      }
+    }
+    console.log(`   ✅ Added state filter: ${entities.state}`);
+  }
+  
+  console.log(`   📝 Enhanced: ${enhanced.substring(0, 150)}...`);
+  return enhanced;
+}
+
+/**
+ * Look up PatNum for a patient name
+ */
+async function lookupPatientNumber(patientName) {
+  console.log(`   🔍 Looking up PatNum for: ${patientName}`);
+  
+  try {
+    const nameParts = patientName.trim().split(/\s+/);
+    const firstName = nameParts[0];
+    const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+    
+    let searchQuery = `SELECT PatNum, LName, FName FROM patient WHERE `;
+    if (lastName) {
+      searchQuery += `LName LIKE '%${lastName}%' AND FName LIKE '%${firstName}%'`;
+    } else {
+      searchQuery += `(LName LIKE '%${firstName}%' OR FName LIKE '%${firstName}%')`;
+    }
+    searchQuery += ` AND PatStatus != 2 LIMIT 10`;
+    
+    const result = await executeSQL(searchQuery);
+    
+    if (result.success && result.data && result.data.data && result.data.data.length > 0) {
+      const patients = result.data.data;
+      console.log(`   ✅ Found ${patients.length} matching patient(s)`);
+      
+      if (patients.length === 1) {
+        return {
+          found: true,
+          patNum: patients[0].PatNum,
+          name: `${patients[0].FName} ${patients[0].LName}`,
+          matches: patients
+        };
+      } else {
+        return {
+          found: true,
+          multiple: true,
+          matches: patients,
+          message: `Found ${patients.length} patients matching "${patientName}"`
+        };
+      }
+    } else {
+      return {
+        found: false,
+        message: `No patient found matching "${patientName}"`
+      };
+    }
+  } catch (error) {
+    console.error(`   ❌ Error looking up patient: ${error.message}`);
+    return {
+      found: false,
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Substitute patient name with PatNum in query
+ */
+function substitutePatientNumber(sqlQuery, patientName, patNum) {
+  console.log(`   🔄 Substituting "${patientName}" with PatNum = ${patNum}`);
+  
+  let modified = sqlQuery;
+  
+  // Pattern 1: WHERE ... LIKE '%Name%'
+  const likePattern = new RegExp(`LIKE\\s+['"]%?${patientName}%?['"]`, 'gi');
+  modified = modified.replace(likePattern, `= ${patNum}`);
+  
+  // Pattern 2: WHERE Name = 'John Doe'
+  const equalPattern = new RegExp(`=\\s+['"]${patientName}['"]`, 'gi');
+  modified = modified.replace(equalPattern, `= ${patNum}`);
+  
+  // Pattern 3: Just the name in quotes
+  const quotedPattern = new RegExp(`['"]${patientName}['"]`, 'gi');
+  modified = modified.replace(quotedPattern, patNum.toString());
+  
+  // Pattern 4: Column name containing the name
+  const columnPattern = new RegExp(`(FName|LName|PatientName)\\s*=\\s*['"]${patientName}['"]`, 'gi');
+  modified = modified.replace(columnPattern, `PatNum = ${patNum}`);
+  
+  return modified;
+}
+
+async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000, customKey = null) {
   if (!question || question.trim() === '') {
     return {
       success: false,
@@ -1576,6 +2341,55 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
     };
   }
 
+  // ========== STEP 1: Extract Entities from Question ==========
+  console.log(`\n🎯 TXQL Enhancement: Extracting entities from question...`);
+  const entities = extractSQLEntities(question);
+  
+  // ========== STEP 2: Patient Name Lookup (if detected) ==========
+  let patientLookup = null;
+  if (entities.patientName && !entities.patientNum) {
+    console.log(`\n🔍 Patient name detected, looking up PatNum...`);
+    patientLookup = await lookupPatientNumber(entities.patientName);
+    
+    if (patientLookup.found && !patientLookup.multiple) {
+      entities.patientNum = patientLookup.patNum;
+      console.log(`   ✅ Resolved to PatNum: ${entities.patientNum}`);
+    } else if (patientLookup.multiple) {
+      // Multiple patients found - return clarification
+      console.log(`   ⚠️  Multiple patients found, need clarification`);
+      
+      let clarificationMessage = `## 👥 Multiple Patients Found\n\n`;
+      clarificationMessage += `I found **${patientLookup.matches.length}** patients matching "${entities.patientName}":\n\n`;
+      
+      patientLookup.matches.forEach((patient, idx) => {
+        clarificationMessage += `${idx + 1}. **${patient.FName} ${patient.LName}** (PatNum: \`${patient.PatNum}\`)\n`;
+      });
+      
+      clarificationMessage += `\n💡 **Please rephrase your question with the specific PatNum**, for example:\n`;
+      clarificationMessage += `- "Show appointments for PatNum = ${patientLookup.matches[0].PatNum}"\n`;
+      clarificationMessage += `- "Get notes for PatNum ${patientLookup.matches[0].PatNum}"\n`;
+      
+      return {
+        success: true,
+        data: clarificationMessage,
+        needsClarification: true,
+        patientMatches: patientLookup.matches,
+        sessionId: sessionId,
+        system: 'txql'
+      };
+    } else {
+      // No patients found
+      console.log(`   ❌ No patients found matching "${entities.patientName}"`);
+      
+      return {
+        success: true,
+        data: `## ❌ No Patient Found\n\nI couldn't find any patient matching "${entities.patientName}".\n\n💡 **Suggestions:**\n- Check the spelling\n- Try using first and last name\n- Use PatNum if you know it: "Show appointments for PatNum = 123"`,
+        sessionId: sessionId,
+        system: 'txql'
+      };
+    }
+  }
+
   // SPECIAL CASE: Multi-patient pricing search
   // Handle queries like "find 10 patients with pricing information"
   if (isMultiPatientPricingSearch(question)) {
@@ -1585,7 +2399,7 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
     const searchSQL = buildMultiPatientPricingSearchSQL(question);
     if (searchSQL) {
       const safeSqlQuery = ensureQueryHasLimit(searchSQL);
-      const sqlResults = await executeSQL(safeSqlQuery);
+      const sqlResults = await executeSQL(safeSqlQuery, customKey);
       
       // Format results specifically for pricing search
       const formattedOutput = formatMultiPatientPricingResults(sqlResults, safeSqlQuery, question);
@@ -1607,7 +2421,7 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
   const TXQL_API_URL = 'https://txql.8px.us/api/sql/query';
 
   // Log initial connection attempt details
-  console.log(`ðŸ” TXQL Connection Details:`);
+  console.log(`🔗 TXQL Connection Details:`);
   console.log(`   Endpoint: ${TXQL_API_URL}`);
   console.log(`   Session: ${sessionId}`);
   console.log(`   Question: ${question.trim()}`);
@@ -1617,11 +2431,11 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const startTime = Date.now(); // Moved outside try block
     try {
-      console.log(`ðŸ”„ TXQL Attempt ${attempt}/${maxRetries}: Querying...`);
+      console.log(`🔄 TXQL Attempt ${attempt}/${maxRetries}: Querying...`);
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => {
-        console.warn(`â±ï¸  Timeout triggered after ${timeout}ms on attempt ${attempt}`);
+        console.warn(`⏱️  Timeout triggered after ${timeout}ms on attempt ${attempt}`);
         controller.abort();
       }, timeout);
 
@@ -1641,7 +2455,7 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
       const elapsedTime = Date.now() - startTime;
       clearTimeout(timeoutId);
       
-      console.log(`   â±ï¸  Request completed in ${elapsedTime}ms`);
+      console.log(`   ⏱️  Request completed in ${elapsedTime}ms`);
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => 'Unknown error');
@@ -1649,14 +2463,14 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
       }
 
       const data = await response.json();
-      console.log(`âœ… TXQL: Successfully received response (Attempt ${attempt})`);
+      console.log(`✅ TXQL: Successfully received response (Attempt ${attempt})`);
       console.log(`   Response keys:`, Object.keys(data));
 
-      // NEW: Extract SQL and execute it
+      // ========== STEP 3: Extract SQL and Enhance It ==========
       const sqlQuery = extractSQLFromTXQL(data);
       
       if (sqlQuery) {
-        console.log(`ðŸ“Š Extracted SQL query, validating...`);
+        console.log(`📊 Extracted SQL query, validating...`);
         
         // SPECIAL HANDLING: Check if TXQL query is incomplete for note requests
         const isNoteSummaryRequest = isNoteSummaryQuery(question) || isPricingFromNotesQuery(question);
@@ -1691,10 +2505,18 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
           }
         }
         
+        // ========== STEP 4: Substitute Patient Name with PatNum ==========
+        if (entities.patientName && entities.patientNum && patientLookup) {
+          finalSqlQuery = substitutePatientNumber(finalSqlQuery, entities.patientName, entities.patientNum);
+        }
+        
+        // ========== STEP 5: Enhance Query with Smart Defaults ==========
+        finalSqlQuery = enhanceSQLQuery(finalSqlQuery, entities);
+        
         // Validate SQL syntax
         const validation = validateSQL(finalSqlQuery);
         if (!validation.valid) {
-          console.error(`âŒ SQL Validation Failed: ${validation.error}`);
+          console.error(`❌ SQL Validation Failed: ${validation.error}`);
           
           return {
             success: false,
@@ -1707,29 +2529,31 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
           };
         }
         
-        console.log(`âœ… SQL validation passed, checking for LIMIT clause...`);
+        console.log(`✅ SQL validation passed`);
         
-        // Ensure query has LIMIT clause to prevent database errors
-        const safeSqlQuery = ensureQueryHasLimit(finalSqlQuery);
+        // ========== STEP 6: Execute Enhanced Query ==========
+        const sqlResults = await executeSQL(finalSqlQuery, customKey);
         
-        const sqlResults = await executeSQL(safeSqlQuery);
-        
-        // Format the combined response - pass question for pricing analysis detection
+        // ========== STEP 7: Format Results ==========
         // Note: formatSQLResults may return a promise for AI summaries, so await it
-        const formattedOutput = await Promise.resolve(formatSQLResults(sqlResults, safeSqlQuery, question));
+        const formattedOutput = await Promise.resolve(formatSQLResults(sqlResults, finalSqlQuery, question));
         
         return {
           success: true,
           data: formattedOutput,
-          sqlQuery: safeSqlQuery,
+          sqlQuery: finalSqlQuery,
+          originalQuery: sqlQuery, // Keep original for comparison
           executionResults: sqlResults,
           sessionId: sessionId,
           attempts: attempt,
-          system: 'txql'
+          system: 'txql',
+          enhancementApplied: true,
+          entities: entities, // Include entities for debugging
+          patientLookup: patientLookup // Include patient lookup result if any
         };
       } else {
         // If no SQL found, check if TXQL returned a natural language response
-        console.log(`âš ï¸  Could not extract SQL from TXQL response`);
+        console.log(`⚠️  Could not extract SQL from TXQL response`);
         
         
         // FALLBACK: Try to build SQL directly for note queries
@@ -1738,19 +2562,21 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
           console.log('   💡 Using fallback SQL generation for note query');
           console.log('   📋 Building comprehensive note query with UNION');
           
-          const safeSqlQuery = ensureQueryHasLimit(fallbackSQL);
-          const sqlResults = await executeSQL(safeSqlQuery);
-          const formattedOutput = await Promise.resolve(formatSQLResults(sqlResults, safeSqlQuery, question));
+          const enhancedFallbackSQL = enhanceSQLQuery(fallbackSQL, entities);
+          const sqlResults = await executeSQL(enhancedFallbackSQL, customKey);
+          const formattedOutput = await Promise.resolve(formatSQLResults(sqlResults, enhancedFallbackSQL, question));
           
           return {
             success: true,
             data: formattedOutput,
-            sqlQuery: safeSqlQuery,
+            sqlQuery: enhancedFallbackSQL,
             executionResults: sqlResults,
             sessionId: sessionId,
             attempts: attempt,
             system: 'txql',
-            usedFallback: true
+            usedFallback: true,
+            enhancementApplied: true,
+            entities: entities
           };
         }
         
@@ -1784,30 +2610,30 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
       const elapsedTime = Date.now() - startTime;
 
       if (error.name === 'AbortError') {
-        console.warn(`â±ï¸  TXQL Attempt ${attempt} timed out after ${timeout}ms`);
+        console.warn(`⏱️  TXQL Attempt ${attempt} timed out after ${timeout}ms`);
         console.warn(`   This usually means the TXQL service is slow or unresponsive`);
       } else if (error.message.includes('fetch failed') || error.code === 'ECONNREFUSED') {
-        console.warn(`ðŸŒ TXQL Network error on attempt ${attempt}: ${error.message}`);
+        console.warn(`🌐 TXQL Network error on attempt ${attempt}: ${error.message}`);
         console.warn(`   Cannot reach ${TXQL_API_URL}`);
         console.warn(`   Please verify the TXQL service is running and accessible`);
       } else if (error.message.includes('ENOTFOUND')) {
-        console.warn(`ðŸŒ DNS Resolution failed on attempt ${attempt}`);
+        console.warn(`🌐 DNS Resolution failed on attempt ${attempt}`);
         console.warn(`   Cannot resolve hostname: txql.8px.us`);
       } else {
-        console.warn(`âš ï¸  TXQL Error on attempt ${attempt}: ${error.message}`);
+        console.warn(`⚠️  TXQL Error on attempt ${attempt}: ${error.message}`);
         console.warn(`   Error type: ${error.name || 'Unknown'}`);
         console.warn(`   Time elapsed: ${elapsedTime}ms`);
       }
 
       if (attempt < maxRetries) {
         const retryDelay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
-        console.log(`   â³ Retrying in ${retryDelay}ms...`);
+        console.log(`   ⏳ Retrying in ${retryDelay}ms...`);
         await new Promise(resolve => setTimeout(resolve, retryDelay));
       }
     }
   }
 
-  console.error(`âŒ TXQL: All ${maxRetries} retry attempts failed`);
+  console.error(`❌ TXQL: All ${maxRetries} retry attempts failed`);
   console.error(`   Last error: ${lastError.message}`);
   console.error(`   Error type: ${lastError.name}`);
 
@@ -1820,37 +2646,39 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
     
     if (fallbackSQL) {
       console.log('   ✅ Using fallback SQL generation for note query');
-      const safeSqlQuery = ensureQueryHasLimit(fallbackSQL);
-      const sqlResults = await executeSQL(safeSqlQuery);
-      const formattedOutput = await Promise.resolve(formatSQLResults(sqlResults, safeSqlQuery, question));
+      const enhancedFallbackSQL = enhanceSQLQuery(fallbackSQL, entities);
+      const sqlResults = await executeSQL(enhancedFallbackSQL, customKey);
+      const formattedOutput = await Promise.resolve(formatSQLResults(sqlResults, enhancedFallbackSQL, question));
       
       return {
         success: true,
         data: formattedOutput,
-        sqlQuery: safeSqlQuery,
+        sqlQuery: enhancedFallbackSQL,
         executionResults: sqlResults,
         sessionId: sessionId,
         attempts: maxRetries,
         system: 'txql',
         usedFallback: true,
+        enhancementApplied: true,
+        entities: entities,
         reason: 'TXQL timeout - used direct SQL fallback'
       };
     }
   }
 
 
-  let friendlyMessage = 'âŒ Error: Sorry, I couldn\'t connect to the database server. ';
+  let friendlyMessage = '❌ Error: Sorry, I couldn\'t connect to the database server. ';
 
   if (lastError.name === 'AbortError') {
     friendlyMessage += 'The request took too long (timed out after ' + (timeout/1000) + ' seconds). ';
     friendlyMessage += 'The TXQL service might be unavailable or overloaded. ';
-    friendlyMessage += '\n\nðŸ’¡ **Suggestions:**\n';
+    friendlyMessage += '\n\n💡 **Suggestions:**\n';
     friendlyMessage += '- Try a simpler query\n';
     friendlyMessage += '- Wait a moment and try again\n';
     friendlyMessage += '- Ask about call data instead (AI Voice system is working)';
   } else if (lastError.message.includes('fetch failed') || lastError.code === 'ECONNREFUSED' || lastError.message.includes('ENOTFOUND')) {
     friendlyMessage += 'Cannot reach the TXQL service at `' + TXQL_API_URL + '`. ';
-    friendlyMessage += '\n\nðŸ’¡ **Possible issues:**\n';
+    friendlyMessage += '\n\n💡 **Possible issues:**\n';
     friendlyMessage += '- The TXQL service may be down\n';
     friendlyMessage += '- Network connectivity issues\n';
     friendlyMessage += '- Firewall or DNS problems\n\n';
@@ -1858,7 +2686,7 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
   } else {
     friendlyMessage += 'The TXQL service encountered an error. ';
     friendlyMessage += '\n\n**Error details:** ' + lastError.message;
-    friendlyMessage += '\n\nðŸ’¡ You can try asking about call data instead (AI Voice system is working).';
+    friendlyMessage += '\n\n💡 You can try asking about call data instead (AI Voice system is working).';
   }
 
   return {
@@ -1872,14 +2700,6 @@ async function queryTXQL(question, sessionId, maxRetries = 3, timeout = 60000) {
     endpoint: TXQL_API_URL
   };
 }
-
-// ==================== AI VOICE FUNCTIONS ====================
-// (Keeping all the original AI Voice functions - normalizeCall, buildConversationContext, etc.)
-
-/**
- * Resolve query parameters from conversation context
- * This enables multi-turn conversations where users don't need to repeat dates/license keys
- */
 function resolveFromContext(currentQuestion, session) {
   const result = {
     dates: null,
@@ -2678,6 +3498,748 @@ async function callOpenAI(messages, tools) {
 // ==================== UNIFIED CHAT ENDPOINT ====================
 
 
+// ==================== ENHANCED AI VOICE ANALYSIS ====================
+
+/**
+ * Comprehensive field mapping for AI Voice data
+ * Maps user-friendly terms to actual API fields
+ */
+const AI_VOICE_FIELD_MAP = {
+  // Sentiment & Quality
+  sentiment: ['sentiments', 'user_sentiment'],
+  quality: ['thumbs_up', 'thumbs_down', 'thumbsUpStatus'],
+  successful: ['call_successful', 'confirmation_success', 'reschedule_success', 'successful_upsell'],
+  
+  // Appointment Related
+  appointment: ['isAppointmentBooked', 'appt_booked', 'appointmentBookedDateTime', 'appointmentNumber'],
+  reschedule: ['isAppointmentRescheduled', 'reschedule_success', 'appointmentRescheduledDateTime', 'is_reschedule_opportunity'],
+  cancel: ['isAppointmentCancelled', 'appointmentCanceledDateTime'],
+  
+  // Upsell & Opportunities
+  upsell: ['upsellOpportunity', 'upsellOpportunityDetails', 'upsell_opportunity', 'successful_upsell'],
+  opportunity: ['appt_opportunity', 'missed_appt_opportunity', 'upsell_opportunity'],
+  
+  // Call Details
+  duration: ['callDuration', 'duration_ms'],
+  cost: ['totalCost', 'sttCost', 'llmCost', 'ttsCost', 'vapiCost'],
+  direction: ['callDirection', 'call_type'],
+  
+  // Patient Info
+  patient: ['patientNumber', 'GuestName', 'GuestEmail'],
+  name: ['GuestName'],
+  
+  // Content
+  transcript: ['transcript'],
+  summary: ['callSummary'],
+  topics: ['topics', 'intents'],
+  
+  // Review & Feedback
+  review: ['ai_reviewed', 'what_went_well', 'what_did_not_go_well', 'area_to_improve'],
+  callback: ['is_call_back', 'call_back_due_date', 'CallBackContext'],
+  
+  // Meta
+  language: ['languageUsed'],
+  device: ['deviceType'],
+  confirmation: ['is_confirmation', 'confirmation_success'],
+  reminder: ['is_reminder']
+};
+
+/**
+ * Detect which fields are relevant to a question
+ */
+function detectRelevantFields(question) {
+  const lowerQ = question.toLowerCase();
+  const relevantFields = [];
+  
+  for (const [category, fields] of Object.entries(AI_VOICE_FIELD_MAP)) {
+    if (lowerQ.includes(category)) {
+      relevantFields.push(...fields);
+    }
+  }
+  
+  // Also check for field names directly mentioned
+  const allPossibleFields = Object.values(AI_VOICE_FIELD_MAP).flat();
+  allPossibleFields.forEach(field => {
+    const fieldLower = field.toLowerCase().replace(/_/g, ' ');
+    if (lowerQ.includes(fieldLower)) {
+      relevantFields.push(field);
+    }
+  });
+  
+  return [...new Set(relevantFields)]; // Remove duplicates
+}
+
+/**
+ * Filter calls based on dynamic criteria from question
+ */
+function filterCallsByQuestion(calls, question) {
+  const lowerQ = question.toLowerCase();
+  let filtered = [...calls];
+  
+  console.log(`   🔍 Filtering ${calls.length} calls based on question...`);
+  
+  // Sentiment filters
+  if (lowerQ.includes('positive sentiment') || lowerQ.includes('good sentiment')) {
+    filtered = filtered.filter(c => 
+      c.sentiments === 'Positive' || c.user_sentiment === 'positive'
+    );
+    console.log(`   ✅ Filtered by positive sentiment: ${filtered.length} calls`);
+  }
+  if (lowerQ.includes('negative sentiment') || lowerQ.includes('bad sentiment')) {
+    filtered = filtered.filter(c => 
+      c.sentiments === 'Negative' || c.user_sentiment === 'negative'
+    );
+    console.log(`   ❌ Filtered by negative sentiment: ${filtered.length} calls`);
+  }
+  
+  // Appointment filters
+  if (lowerQ.includes('booked') && lowerQ.includes('appointment')) {
+    filtered = filtered.filter(c => 
+      c.isAppointmentBooked === 1 || c.appt_booked === '1'
+    );
+    console.log(`   📅 Filtered by booked appointments: ${filtered.length} calls`);
+  }
+  if (lowerQ.includes('rescheduled')) {
+    filtered = filtered.filter(c => 
+      c.isAppointmentRescheduled === 1 || c.reschedule_success === '1'
+    );
+    console.log(`   🔄 Filtered by rescheduled: ${filtered.length} calls`);
+  }
+  if (lowerQ.includes('cancelled') || lowerQ.includes('canceled')) {
+    filtered = filtered.filter(c => 
+      c.isAppointmentCancelled === 1
+    );
+    console.log(`   ❌ Filtered by cancelled: ${filtered.length} calls`);
+  }
+  
+  // Upsell filters
+  if (lowerQ.includes('upsell')) {
+    if (lowerQ.includes('successful') || lowerQ.includes('successful upsell')) {
+      filtered = filtered.filter(c => c.successful_upsell === '1');
+      console.log(`   💰 Filtered by successful upsell: ${filtered.length} calls`);
+    } else {
+      filtered = filtered.filter(c => 
+        c.upsellOpportunity === 'Yes' || c.upsell_opportunity === '1'
+      );
+      console.log(`   💡 Filtered by upsell opportunity: ${filtered.length} calls`);
+    }
+  }
+  
+  // Quality filters
+  if (lowerQ.includes('thumbs up') || lowerQ.includes('positive feedback')) {
+    filtered = filtered.filter(c => c.thumbs_up === '1');
+    console.log(`   👍 Filtered by thumbs up: ${filtered.length} calls`);
+  }
+  if (lowerQ.includes('thumbs down') || lowerQ.includes('negative feedback')) {
+    filtered = filtered.filter(c => c.thumbs_down === '1');
+    console.log(`   👎 Filtered by thumbs down: ${filtered.length} calls`);
+  }
+  
+  // Success filters
+  if (lowerQ.includes('unsuccessful') || lowerQ.includes('failed')) {
+    filtered = filtered.filter(c => c.call_successful === '0' || c.call_successful === 'false');
+    console.log(`   ⚠️ Filtered by unsuccessful: ${filtered.length} calls`);
+  }
+  if (lowerQ.includes('successful call')) {
+    filtered = filtered.filter(c => c.call_successful === '1' || c.call_successful === 'true');
+    console.log(`   ✅ Filtered by successful: ${filtered.length} calls`);
+  }
+  
+  // Duration filters
+  const longerMatch = lowerQ.match(/longer than (\d+)/);
+  if (longerMatch) {
+    const minutes = parseInt(longerMatch[1]);
+    filtered = filtered.filter(c => parseInt(c.callDuration || 0) > minutes);
+    console.log(`   ⏱️ Filtered by duration > ${minutes} min: ${filtered.length} calls`);
+  }
+  const shorterMatch = lowerQ.match(/shorter than (\d+)/);
+  if (shorterMatch) {
+    const minutes = parseInt(shorterMatch[1]);
+    filtered = filtered.filter(c => parseInt(c.callDuration || 0) < minutes);
+    console.log(`   ⏱️ Filtered by duration < ${minutes} min: ${filtered.length} calls`);
+  }
+  
+  // Cost filters
+  const costMatch = lowerQ.match(/cost (more|over|greater) than [\$]?(\d+\.?\d*)/);
+  if (costMatch) {
+    const amount = parseFloat(costMatch[2]);
+    filtered = filtered.filter(c => parseFloat(c.totalCost || 0) > amount);
+    console.log(`   💵 Filtered by cost > $${amount}: ${filtered.length} calls`);
+  }
+  
+  // Name filters
+  const nameMatch = lowerQ.match(/for ([A-Z][a-z]+ [A-Z][a-z]+)/);
+  if (nameMatch) {
+    const searchName = nameMatch[1].toLowerCase();
+    filtered = filtered.filter(c => 
+      c.GuestName && c.GuestName.toLowerCase().includes(searchName)
+    );
+    console.log(`   👤 Filtered by name "${searchName}": ${filtered.length} calls`);
+  }
+  
+  // Language filters
+  if (lowerQ.includes('spanish')) {
+    filtered = filtered.filter(c => c.languageUsed?.toLowerCase() === 'spanish');
+    console.log(`   🇪🇸 Filtered by Spanish: ${filtered.length} calls`);
+  }
+  if (lowerQ.includes('english')) {
+    filtered = filtered.filter(c => c.languageUsed?.toLowerCase() === 'english');
+    console.log(`   🇺🇸 Filtered by English: ${filtered.length} calls`);
+  }
+  
+  // Follow-up required
+  if (lowerQ.includes('follow-up') || lowerQ.includes('callback')) {
+    filtered = filtered.filter(c => c.isfollowuprequired === 1 || c.is_call_back === '1');
+    console.log(`   📞 Filtered by follow-up required: ${filtered.length} calls`);
+  }
+  
+  return filtered;
+}
+
+/**
+ * Build comprehensive analysis summary
+ */
+function buildComprehensiveCallAnalysis(calls, question) {
+  if (!calls || calls.length === 0) {
+    return "No calls match your criteria.";
+  }
+  
+  const relevantFields = detectRelevantFields(question);
+  console.log(`   📊 Detected relevant fields:`, relevantFields.join(', '));
+  
+  let summary = `## 📊 Call Analysis Results\n\n`;
+  summary += `**Total Calls:** ${calls.length}\n\n`;
+  
+  // Appointment Stats
+  const apptBooked = calls.filter(c => c.isAppointmentBooked === 1 || c.appt_booked === '1').length;
+  const apptRescheduled = calls.filter(c => c.isAppointmentRescheduled === 1).length;
+  const apptCancelled = calls.filter(c => c.isAppointmentCancelled === 1).length;
+  
+  if (relevantFields.some(f => f.includes('appointment') || f.includes('appt'))) {
+    summary += `### 📅 Appointments\n`;
+    summary += `- Booked: **${apptBooked}**\n`;
+    summary += `- Rescheduled: **${apptRescheduled}**\n`;
+    summary += `- Cancelled: **${apptCancelled}**\n\n`;
+  }
+  
+  // Upsell Stats
+  const upsellOpp = calls.filter(c => c.upsellOpportunity === 'Yes' || c.upsell_opportunity === '1').length;
+  const upsellSuccess = calls.filter(c => c.successful_upsell === '1').length;
+  
+  if (relevantFields.some(f => f.includes('upsell'))) {
+    summary += `### 💰 Upsell Performance\n`;
+    summary += `- Opportunities: **${upsellOpp}**\n`;
+    summary += `- Successful: **${upsellSuccess}**\n`;
+    if (upsellOpp > 0) {
+      summary += `- Success Rate: **${((upsellSuccess / upsellOpp) * 100).toFixed(1)}%**\n`;
+    }
+    summary += `\n`;
+  }
+  
+  // Sentiment Analysis
+  const sentiments = {};
+  calls.forEach(c => {
+    const sentiment = c.sentiments || c.user_sentiment || 'Unknown';
+    sentiments[sentiment] = (sentiments[sentiment] || 0) + 1;
+  });
+  
+  if (relevantFields.some(f => f.includes('sentiment'))) {
+    summary += `### 😊 Sentiment Breakdown\n`;
+    Object.entries(sentiments).forEach(([s, count]) => {
+      const emoji = s === 'Positive' ? '✅' : s === 'Negative' ? '❌' : '➖';
+      summary += `${emoji} ${s}: **${count}** (${((count / calls.length) * 100).toFixed(1)}%)\n`;
+    });
+    summary += `\n`;
+  }
+  
+  // Quality Scores
+  const thumbsUp = calls.filter(c => c.thumbs_up === '1').length;
+  const thumbsDown = calls.filter(c => c.thumbs_down === '1').length;
+  
+  if (relevantFields.some(f => f.includes('thumbs') || f.includes('quality'))) {
+    summary += `### 👍 Quality Scores\n`;
+    summary += `- Thumbs Up: **${thumbsUp}**\n`;
+    summary += `- Thumbs Down: **${thumbsDown}**\n\n`;
+  }
+  
+  // Cost Analysis
+  const totalCost = calls.reduce((sum, c) => sum + parseFloat(c.totalCost || 0), 0);
+  const avgCost = totalCost / calls.length;
+  const avgDuration = calls.reduce((sum, c) => sum + parseInt(c.callDuration || 0), 0) / calls.length;
+  
+  if (relevantFields.some(f => f.includes('cost') || f.includes('duration'))) {
+    summary += `### 💵 Cost & Duration\n`;
+    summary += `- Total Cost: **$${totalCost.toFixed(2)}**\n`;
+    summary += `- Average Cost: **$${avgCost.toFixed(3)}**\n`;
+    summary += `- Average Duration: **${Math.round(avgDuration)} minutes**\n\n`;
+  }
+  
+  // Call Direction
+  const inbound = calls.filter(c => c.callDirection === 'inbound').length;
+  const outbound = calls.filter(c => c.callDirection === 'outbound').length;
+  
+  if (relevantFields.some(f => f.includes('direction'))) {
+    summary += `### 📞 Call Direction\n`;
+    summary += `- Inbound: **${inbound}**\n`;
+    summary += `- Outbound: **${outbound}**\n\n`;
+  }
+  
+  return summary;
+}
+
+/**
+ * Format call details for specific questions (like transcripts)
+ */
+function formatCallDetails(calls, question, showFields = []) {
+  if (!calls || calls.length === 0) return "No calls found.";
+  
+  const lowerQ = question.toLowerCase();
+  let output = '';
+  
+  // Check if user wants transcripts
+  if (lowerQ.includes('transcript')) {
+    output += `## 📝 Call Transcripts\n\n`;
+    output += `**Found ${calls.length} call${calls.length !== 1 ? 's' : ''}**\n\n`;
+    
+    calls.slice(0, 10).forEach((call, idx) => {
+      output += `### Call ${idx + 1}: ${call.GuestName || 'Unknown'}\n`;
+      output += `**Date:** ${call.startTime || call.createdAt}\n`;
+      output += `**Duration:** ${call.callDuration || 0} minutes\n`;
+      output += `**Phone:** ${call.phoneNumber || 'N/A'}\n\n`;
+      
+      if (call.transcript && call.transcript.trim()) {
+        output += `**Transcript:**\n${call.transcript}\n\n`;
+      } else {
+        output += `*No transcript available*\n\n`;
+      }
+      
+      output += `---\n\n`;
+    });
+    
+    if (calls.length > 10) {
+      output += `\n*Showing first 10 of ${calls.length} transcripts*\n`;
+    }
+    
+    return output;
+  }
+  
+  // Check if user wants summaries
+  if (lowerQ.includes('summary') || lowerQ.includes('summaries')) {
+    output += `## 📋 Call Summaries\n\n`;
+    output += `**Found ${calls.length} call${calls.length !== 1 ? 's' : ''}**\n\n`;
+    
+    calls.slice(0, 20).forEach((call, idx) => {
+      output += `### ${idx + 1}. ${call.GuestName || 'Unknown'}\n`;
+      output += `**Date:** ${call.startTime || call.createdAt}\n`;
+      output += `**Summary:** ${call.callSummary || 'No summary'}\n\n`;
+      
+      if (call.upsellOpportunityDetails && call.upsellOpportunityDetails !== 'NA') {
+        output += `**Upsell:** ${call.upsellOpportunityDetails}\n\n`;
+      }
+      
+      output += `---\n\n`;
+    });
+    
+    if (calls.length > 20) {
+      output += `\n*Showing first 20 of ${calls.length} summaries*\n`;
+    }
+    
+    return output;
+  }
+  
+  // Check if user wants specific review/feedback
+  if (lowerQ.includes('review') || lowerQ.includes('feedback') || lowerQ.includes('improve')) {
+    output += `## 🔍 Call Reviews & Feedback\n\n`;
+    
+    const reviewedCalls = calls.filter(c => c.ai_reviewed === '1');
+    
+    if (reviewedCalls.length === 0) {
+      output += `*No AI-reviewed calls found in the filtered results*\n`;
+      return output;
+    }
+    
+    output += `**Found ${reviewedCalls.length} reviewed call${reviewedCalls.length !== 1 ? 's' : ''}**\n\n`;
+    
+    reviewedCalls.slice(0, 10).forEach((call, idx) => {
+      output += `### ${idx + 1}. ${call.GuestName || 'Unknown'} - ${call.startTime || call.createdAt}\n\n`;
+      
+      if (call.what_went_well) {
+        output += `✅ **What Went Well:**\n${call.what_went_well}\n\n`;
+      }
+      
+      if (call.what_did_not_go_well) {
+        output += `❌ **What Didn't Go Well:**\n${call.what_did_not_go_well}\n\n`;
+      }
+      
+      if (call.area_to_improve) {
+        output += `💡 **Areas to Improve:**\n${call.area_to_improve}\n\n`;
+      }
+      
+      output += `---\n\n`;
+    });
+    
+    if (reviewedCalls.length > 10) {
+      output += `\n*Showing first 10 of ${reviewedCalls.length} reviews*\n`;
+    }
+    
+    return output;
+  }
+  
+  // Default: Show comprehensive analysis
+  return buildComprehensiveCallAnalysis(calls, question);
+}
+
+// ==================== INTELLIGENT NLP ROUTING SYSTEM ====================
+
+/**
+ * Classify the intent of a user's AI Voice question
+ * Returns: 'filter', 'count', 'content', 'analysis', or null
+ */
+function classifyAIVoiceIntent(question) {
+  const lowerQ = question.toLowerCase();
+  
+  // Intent Groups with their keywords
+  // IMPORTANT: Check in priority order - count > filter > content > analysis
+  const intents = {
+    // COUNT intent - user wants statistics/numbers (HIGHEST PRIORITY for "how many")
+    count: {
+      keywords: ['how many', 'count', 'total', 'number of', 'how much'],
+      confidence: 0,
+      priority: 4
+    },
+    
+    // FILTER intent - user wants filtered/specific data
+    filter: {
+      keywords: ['show', 'which', 'find', 'list', 'give me', 'provide', 'display', 'where'],
+      // REMOVED 'get' - too generic and conflicts with "how many calls did we get"
+      confidence: 0,
+      priority: 3
+    },
+    
+    // CONTENT intent - user wants text content
+    content: {
+      keywords: ['transcript', 'transcripts', 'summary', 'summaries', 'text', 'details', 'read', 'what.*say', 'what.*said'],
+      confidence: 0,
+      priority: 2
+    },
+    
+    // ANALYSIS intent - user wants insights/review
+    analysis: {
+      keywords: ['analyze', 'review', 'feedback', 'performance', 'insights', 'what went well', 'what went wrong', 'improve'],
+      confidence: 0,
+      priority: 1
+    }
+  };
+  
+  // Calculate confidence scores
+  for (const [intent, data] of Object.entries(intents)) {
+    data.confidence = data.keywords.filter(kw => {
+      // Support regex patterns in keywords
+      if (kw.includes('.*')) {
+        return new RegExp(kw).test(lowerQ);
+      }
+      return lowerQ.includes(kw);
+    }).length;
+  }
+  
+  // Get primary intent (highest confidence, then by priority)
+  const sortedIntents = Object.entries(intents)
+    .sort((a, b) => {
+      // First sort by confidence
+      if (b[1].confidence !== a[1].confidence) {
+        return b[1].confidence - a[1].confidence;
+      }
+      // Tie-breaker: use priority
+      return b[1].priority - a[1].priority;
+    });
+  
+  const primaryIntent = sortedIntents[0];
+  
+  if (primaryIntent[1].confidence > 0) {
+    console.log(`   🎯 Intent detected: ${primaryIntent[0]} (confidence: ${primaryIntent[1].confidence})`);
+    return primaryIntent[0];
+  }
+  
+  return null;
+}
+
+/**
+ * Extract entities (data fields) from the question
+ * Returns an object with all detected entities
+ */
+function extractCallEntities(question) {
+  const lowerQ = question.toLowerCase();
+  
+  const entities = {
+    // Status entities
+    appointmentStatus: null,  // 'booked', 'cancelled', 'rescheduled'
+    callSuccess: null,         // true, false
+    sentiment: null,           // 'positive', 'negative'
+    quality: null,             // 'thumbs_up', 'thumbs_down'
+    
+    // Opportunity entities
+    hasUpsell: null,          // true
+    needsFollowup: null,      // true
+    
+    // Attribute entities
+    language: null,            // 'spanish', 'english'
+    duration: null,            // { operator: '>', value: number }
+    cost: null,                // { operator: '>', value: number }
+    name: null,                // patient name string
+    
+    // Time entities (handled by detectSingleDateFromQuestion)
+    dates: null
+  };
+  
+  // ========== Appointment Status ==========
+  if (lowerQ.match(/\b(book|booked|scheduled|made.*appointment)\b/)) {
+    entities.appointmentStatus = 'booked';
+  }
+  if (lowerQ.match(/\b(cancel|cancelled|canceled)\b/)) {
+    entities.appointmentStatus = 'cancelled';
+  }
+  if (lowerQ.match(/\b(reschedule|rescheduled|changed|moved)\b/)) {
+    entities.appointmentStatus = 'rescheduled';
+  }
+  
+  // ========== Call Success ==========
+  // Negative success patterns (unsuccessful, failed, didn't work)
+  if (lowerQ.match(/\b(unsuccessful|failed|didn'?t (work|succeed)|not successful|wasn'?t successful|no success)\b/)) {
+    entities.callSuccess = false;
+  }
+  // Positive success patterns
+  if (lowerQ.match(/\b(successful|succeeded|worked|did work|was successful)\b/) && !entities.callSuccess) {
+    entities.callSuccess = true;
+  }
+  
+  // ========== Sentiment ==========
+  if (lowerQ.match(/\b(positive|good|happy|satisfied|pleased)\b.*\b(sentiment|feedback|feeling)\b/i)) {
+    entities.sentiment = 'positive';
+  }
+  if (lowerQ.match(/\b(negative|bad|unhappy|unsatisfied|upset|angry)\b.*\b(sentiment|feedback|feeling)\b/i)) {
+    entities.sentiment = 'negative';
+  }
+  // Also match reversed order: "sentiment was positive"
+  if (lowerQ.match(/\b(sentiment|feedback|feeling)\b.*\b(positive|good|happy)\b/i)) {
+    entities.sentiment = 'positive';
+  }
+  if (lowerQ.match(/\b(sentiment|feedback|feeling)\b.*\b(negative|bad|unhappy)\b/i)) {
+    entities.sentiment = 'negative';
+  }
+  
+  // ========== Quality Scores ==========
+  if (lowerQ.match(/\b(thumbs? up|positive feedback|good rating|high score)\b/)) {
+    entities.quality = 'thumbs_up';
+  }
+  if (lowerQ.match(/\b(thumbs? down|negative feedback|bad rating|low score)\b/)) {
+    entities.quality = 'thumbs_down';
+  }
+  
+  // ========== Upsell Opportunities ==========
+  if (lowerQ.match(/\b(upsell|upgrade|additional service|extra service|more.*service)\b/)) {
+    entities.hasUpsell = true;
+  }
+  
+  // ========== Follow-up Required ==========
+  if (lowerQ.match(/\b(follow-up|follow up|callback|call back|need.*contact|requires?.*follow|need.*call)\b/)) {
+    entities.needsFollowup = true;
+  }
+  
+  // ========== Language ==========
+  if (lowerQ.match(/\bspanish\b/)) entities.language = 'spanish';
+  if (lowerQ.match(/\benglish\b/)) entities.language = 'english';
+  
+  // ========== Duration (with numbers) ==========
+  const longerMatch = lowerQ.match(/\b(longer|more|greater|over|above)\s+than\s+(\d+)\s*(min|minute|sec|second)?/i);
+  if (longerMatch) {
+    entities.duration = { 
+      operator: '>', 
+      value: parseInt(longerMatch[2])
+    };
+  }
+  
+  const shorterMatch = lowerQ.match(/\b(shorter|less|under|below|fewer)\s+than\s+(\d+)\s*(min|minute|sec|second)?/i);
+  if (shorterMatch) {
+    entities.duration = { 
+      operator: '<', 
+      value: parseInt(shorterMatch[2])
+    };
+  }
+  
+  // ========== Cost ==========
+  const costMatch = lowerQ.match(/\b(more|over|greater|above)\s+than\s+\$?(\d+\.?\d*)/i);
+  if (costMatch) {
+    entities.cost = { 
+      operator: '>', 
+      value: parseFloat(costMatch[2])
+    };
+  }
+  
+  const lessCostMatch = lowerQ.match(/\b(less|under|below)\s+than\s+\$?(\d+\.?\d*)/i);
+  if (lessCostMatch) {
+    entities.cost = { 
+      operator: '<', 
+      value: parseFloat(lessCostMatch[2])
+    };
+  }
+  
+  // ========== Patient Name (Title Case) ==========
+  const nameMatch = question.match(/\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b/);
+  if (nameMatch) {
+    entities.name = nameMatch[1];
+  }
+  
+  // Log detected entities
+  const detectedEntities = Object.entries(entities)
+    .filter(([_, v]) => v !== null)
+    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+    .join(', ');
+  
+  if (detectedEntities) {
+    console.log(`   📊 Entities detected: ${detectedEntities}`);
+  }
+  
+  return entities;
+}
+
+/**
+ * Filter calls based on extracted entities (more intelligent than keyword matching)
+ */
+function filterCallsByEntities(calls, entities) {
+  let filtered = [...calls];
+  const initialCount = filtered.length;
+  
+  console.log(`   🔍 Filtering ${initialCount} calls with entity-based filters...`);
+  
+  // ========== Appointment Status Filters ==========
+  if (entities.appointmentStatus === 'booked') {
+    filtered = filtered.filter(c => 
+      c.isAppointmentBooked === 1 || c.appt_booked === '1'
+    );
+    console.log(`      📅 Appointment booked: ${filtered.length} calls`);
+  }
+  
+  if (entities.appointmentStatus === 'cancelled') {
+    filtered = filtered.filter(c => c.isAppointmentCancelled === 1);
+    console.log(`      ❌ Appointment cancelled: ${filtered.length} calls`);
+  }
+  
+  if (entities.appointmentStatus === 'rescheduled') {
+    filtered = filtered.filter(c => 
+      c.isAppointmentRescheduled === 1 || c.reschedule_success === '1'
+    );
+    console.log(`      🔄 Appointment rescheduled: ${filtered.length} calls`);
+  }
+  
+  // ========== Call Success Filters ==========
+  if (entities.callSuccess === false) {
+    filtered = filtered.filter(c => 
+      c.call_successful === '0' || 
+      c.call_successful === 'false' ||
+      c.confirmation_success === '0' ||
+      c.call_status === 'failed'
+    );
+    console.log(`      ⚠️  Unsuccessful calls: ${filtered.length} calls`);
+  }
+  
+  if (entities.callSuccess === true) {
+    filtered = filtered.filter(c => 
+      c.call_successful === '1' || 
+      c.call_successful === 'true' ||
+      c.confirmation_success === '1' ||
+      c.call_status === 'success'
+    );
+    console.log(`      ✅ Successful calls: ${filtered.length} calls`);
+  }
+  
+  // ========== Sentiment Filters ==========
+  if (entities.sentiment === 'positive') {
+    filtered = filtered.filter(c => 
+      c.sentiments === 'Positive' || c.user_sentiment === 'positive'
+    );
+    console.log(`      😊 Positive sentiment: ${filtered.length} calls`);
+  }
+  
+  if (entities.sentiment === 'negative') {
+    filtered = filtered.filter(c => 
+      c.sentiments === 'Negative' || c.user_sentiment === 'negative'
+    );
+    console.log(`      😞 Negative sentiment: ${filtered.length} calls`);
+  }
+  
+  // ========== Quality Filters ==========
+  if (entities.quality === 'thumbs_up') {
+    filtered = filtered.filter(c => c.thumbs_up === '1');
+    console.log(`      👍 Thumbs up: ${filtered.length} calls`);
+  }
+  
+  if (entities.quality === 'thumbs_down') {
+    filtered = filtered.filter(c => c.thumbs_down === '1');
+    console.log(`      👎 Thumbs down: ${filtered.length} calls`);
+  }
+  
+  // ========== Upsell Filters ==========
+  if (entities.hasUpsell) {
+    filtered = filtered.filter(c => 
+      c.upsellOpportunity === 'Yes' || c.upsell_opportunity === '1'
+    );
+    console.log(`      💰 Upsell opportunities: ${filtered.length} calls`);
+  }
+  
+  // ========== Follow-up Filters ==========
+  if (entities.needsFollowup) {
+    filtered = filtered.filter(c => 
+      c.isfollowuprequired === 1 || c.is_call_back === '1'
+    );
+    console.log(`      📞 Follow-up required: ${filtered.length} calls`);
+  }
+  
+  // ========== Language Filters ==========
+  if (entities.language) {
+    filtered = filtered.filter(c => 
+      c.languageUsed?.toLowerCase() === entities.language
+    );
+    console.log(`      🌐 Language (${entities.language}): ${filtered.length} calls`);
+  }
+  
+  // ========== Duration Filters ==========
+  if (entities.duration) {
+    filtered = filtered.filter(c => {
+      const duration = parseInt(c.callDuration || c.duration_ms || 0);
+      if (entities.duration.operator === '>') {
+        return duration > entities.duration.value;
+      } else {
+        return duration < entities.duration.value;
+      }
+    });
+    console.log(`      ⏱️  Duration ${entities.duration.operator} ${entities.duration.value}: ${filtered.length} calls`);
+  }
+  
+  // ========== Cost Filters ==========
+  if (entities.cost) {
+    filtered = filtered.filter(c => {
+      const cost = parseFloat(c.totalCost || 0);
+      if (entities.cost.operator === '>') {
+        return cost > entities.cost.value;
+      } else {
+        return cost < entities.cost.value;
+      }
+    });
+    console.log(`      💵 Cost ${entities.cost.operator} $${entities.cost.value}: ${filtered.length} calls`);
+  }
+  
+  // ========== Name Filters ==========
+  if (entities.name) {
+    filtered = filtered.filter(c => 
+      c.GuestName && c.GuestName.toLowerCase().includes(entities.name.toLowerCase())
+    );
+    console.log(`      👤 Name contains "${entities.name}": ${filtered.length} calls`);
+  }
+  
+  console.log(`   ✅ Final filtered count: ${filtered.length} of ${initialCount} calls`);
+  return filtered;
+}
+
 // ==================== EXPORTS ====================
 
 module.exports = {
@@ -2692,6 +4254,10 @@ module.exports = {
   testTXQLConnection,
   testAIVoiceConnection,
   
+  // License Key Preprocessors (NEW)
+  preprocessLicenseKeyFromQuestion,
+  preprocessTXQLLicenseKey,
+  
   // Greeting & routing
   extractLicenseKey,
   isGreeting,
@@ -2705,6 +4271,18 @@ module.exports = {
   executeSQL,
   validateSQL,
   ensureQueryHasLimit,
+  
+  // TXQL Enhancement (NEW)
+  extractSQLEntities,
+  enhanceSQLQuery,
+  lookupPatientNumber,
+  substitutePatientNumber,
+  
+  // TXQL Enhancement (NEW)
+  extractSQLEntities,
+  enhanceSQLQuery,
+  lookupPatientNumber,
+  substitutePatientNumber,
   
   // TXQL
   queryTXQL,
@@ -2752,7 +4330,18 @@ module.exports = {
   getModeLabel,
   extractPhoneCallDetails,
   formatCommLogAsStructuredData,
-  callOpenAI
+  callOpenAI,
+  
+  // NEW: Enhanced AI Voice analysis
+  detectRelevantFields,
+  filterCallsByQuestion,
+  buildComprehensiveCallAnalysis,
+  formatCallDetails,
+  
+  // NEW: Intelligent NLP routing
+  classifyAIVoiceIntent,
+  extractCallEntities,
+  filterCallsByEntities
 };
 // ==================== COMMLOG FUNCTIONS ====================
 

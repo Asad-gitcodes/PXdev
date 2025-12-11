@@ -1,12 +1,11 @@
 // server.js - Express Server & Routes
-// This file sets up the Express server and defines all API endpoints
 
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 require('dotenv').config();
 
-// Import configuration and services
+// Import configuration and services = config.js and services.js
 const config = require('./config');
 const services = require('./services');
 
@@ -17,13 +16,15 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Log configuration on startup
+// Calls a function in config to print configuration details when the server starts.
 config.logConfig();
 
+
+//===================== UNIFIED CHATBOT ENDPOINT ====================
 app.post('/api/chat', async (req, res) => {
   try {
     const { question, userId = 'anonymous' } = req.body;
-
+// check point -1 
     if (!question) {
       return res.status(400).json({
         success: false,
@@ -32,15 +33,15 @@ app.post('/api/chat', async (req, res) => {
     }
 
     console.log(`\n${'='.repeat(70)}`);
-    console.log(`ðŸ“© NEW QUESTION: "${question}"`);
-    console.log(`ðŸ‘¤ User ID: ${userId}`);
+    console.log(`🗂️ NEW QUESTION: "${question}"`);
+    console.log(`🧑User ID: ${userId}`);
     console.log(`${'='.repeat(70)}\n`);
 
     const session = services.getOrCreateSession(userId);
 
-    // Check for greetings first
+    // ======================================= Check point - 2 Check for greetings first =======================================
     if (services.isGreeting(question)) {
-      console.log(`ðŸ‘‹ Detected greeting, returning friendly response`);
+      console.log(`👋 Detected greeting, returning friendly response`);
       const greetingResponse = services.getGreetingResponse();
       
       session.conversationHistory.push({
@@ -49,7 +50,7 @@ app.post('/api/chat', async (req, res) => {
         system: 'greeting',
         result: { answer: greetingResponse }
       });
-
+// Send back the greeting response as JSON and stop processing further.
       return res.json({
         success: true,
         answer: greetingResponse,
@@ -57,14 +58,40 @@ app.post('/api/chat', async (req, res) => {
         sessionId: session.sessionId
       });
     }
-
-    // Determine which system should handle the question
+// =======================================  Check point - 3 System routing =======================================
+   
+// Determine which system should handle the question
     const targetSystem = services.determineSystem(question);
 
-    // Route to TXQL
+    // ======================. Route to TXQL  ======================
+
     if (targetSystem === 'txql') {
-      console.log(`ðŸ”µ Routing to TXQL system...`);
-      const result = await services.queryTXQL(question, session.txqlSessionId);
+      console.log(`🧭 Routing to TXQL system...`);
+      
+      // ========== STEP 1: Preprocess for TXQL license key ==========
+      const txqlPreprocessed = services.preprocessTXQLLicenseKey(question);
+      
+      let txqlKey = null;
+      let queryToProcess = question;
+      
+      if (txqlPreprocessed.hasTXQLKey) {
+        console.log(`✅ TXQL query with custom license key detected`);
+        txqlKey = txqlPreprocessed.txqlLicenseKey;
+        queryToProcess = txqlPreprocessed.actualQuery;
+        console.log(`   📝 Processing query: "${queryToProcess}"`);
+        console.log(`   🔑 Using custom key for database selection`);
+      } else {
+        console.log(`ℹ️  No custom key detected - using default QUERY_EXEC_KEY`);
+      }
+      
+      // ========== STEP 2: Execute TXQL query with optional custom key ==========
+      const result = await services.queryTXQL(
+        queryToProcess,
+        session.txqlSessionId,
+        3,        // maxRetries
+        60000,    // timeout
+        txqlKey   // customKey (null if not provided)
+      );
 
       if (result.success) {
         // Check if this is CommLog data
@@ -76,7 +103,7 @@ app.post('/api/chat', async (req, res) => {
         );
         
         if (isCommLogData) {
-          console.log(`ðŸ“‹ Detected CommLog data - returning structured format`);
+          console.log(`📋 Detected CommLog data - returning structured format`);
           const structuredData = services.formatCommLogAsStructuredData(data);
           
           session.conversationHistory.push({
@@ -85,7 +112,9 @@ app.post('/api/chat', async (req, res) => {
             system: 'txql',
             result: {
               ...result,
-              structuredData: structuredData
+              structuredData: structuredData,
+              customKeyUsed: txqlPreprocessed.hasTXQLKey,
+              licenseKey: txqlKey
             }
           });
 
@@ -94,7 +123,9 @@ app.post('/api/chat', async (req, res) => {
             answer: `Found ${data.length} communication records for this patient`,
             sqlQuery: result.sqlQuery,
             executionResults: result.executionResults,
-            structuredData: structuredData,  // Add structured data for React components
+            structuredData: structuredData,
+            customKeyUsed: txqlPreprocessed.hasTXQLKey,
+            licenseKey: txqlKey ? txqlKey.substring(0, 40) + '...' : null,
             system: 'txql',
             sessionId: session.sessionId
           });
@@ -105,7 +136,11 @@ app.post('/api/chat', async (req, res) => {
           timestamp: new Date(),
           question: question,
           system: 'txql',
-          result: result
+          result: {
+            ...result,
+            customKeyUsed: txqlPreprocessed.hasTXQLKey,
+            licenseKey: txqlKey
+          }
         });
 
         return res.json({
@@ -113,6 +148,8 @@ app.post('/api/chat', async (req, res) => {
           answer: result.data,
           sqlQuery: result.sqlQuery,
           executionResults: result.executionResults,
+          customKeyUsed: txqlPreprocessed.hasTXQLKey,
+          licenseKey: txqlKey ? txqlKey.substring(0, 40) + '...' : null,
           system: 'txql',
           sessionId: session.sessionId
         });
@@ -120,458 +157,478 @@ app.post('/api/chat', async (req, res) => {
         return res.status(500).json({
           success: false,
           error: result.friendlyError,
+          customKeyUsed: txqlPreprocessed.hasTXQLKey,
+          licenseKey: txqlKey ? txqlKey.substring(0, 40) + '...' : null,
           system: 'txql',
           sessionId: session.sessionId
         });
       }
     }
 
+    // =========================  Route to AI Voice ========================
+
+    
     // Route to AI Voice
-    if (targetSystem === 'aivoice') {
-      console.log(`ðŸŸ¢ Routing to AI Voice system...`);
+if (targetSystem === 'aivoice') {
+  console.log(`🟢 Routing to AI Voice system...`);
 
-      // Check if this is a license key query FIRST (before OpenAI)
-      const isLicenseQuery = config.isLicenseKeyQuery(question);
-      
-      // Check if this is a call direction query (inbound/outbound)
-      const isDirectionQuery = config.isCallDirectionQuery(question);
-      
-      // Resolve context from conversation history
-      const context = services.resolveFromContext(question, session);
-      
-      // Use context-resolved values or extract from current question
-      const extractedKey = context.licenseKey || services.extractLicenseKey(question);
-      
-      if (isDirectionQuery) {
-        console.log(`📞 Detected call direction query (bypassing OpenAI)`);
-        
-        // Use resolved dates from context or current question
-        const startDate = context.dates?.startDate || config.getCurrentDateInTimezone(config.TIMEZONE);
-        const endDate = context.dates?.endDate || config.getCurrentDateInTimezone(config.TIMEZONE);
-        
-        console.log(`   Date range: ${startDate} to ${endDate}`);
-        
-        // Fetch call data
-        const callResult = await services.fetchCallDetails(startDate, endDate, false, false);
-        
-        if (!callResult.success) {
-          return res.status(500).json({
-            success: false,
-            error: callResult.error,
-            friendlyError: callResult.friendlyError,
-            system: 'aivoice',
-            sessionId: session.sessionId
-          });
-        }
-        
-        if (!callResult.rawData || callResult.rawData.length === 0) {
-          const answer = `No calls found for the date range ${startDate} to ${endDate}.`;
-          
-          session.conversationHistory.push({
-            timestamp: new Date(),
-            question: question,
-            system: 'aivoice',
-            result: { 
-              success: true, 
-              answer: answer,
-              dateRange: { startDate, endDate }
-            }
-          });
-          
-          return res.json({
-            success: true,
-            answer: answer,
-            callHistory: [],
-            system: 'aivoice',
-            sessionId: session.sessionId
-          });
-        }
-        
-        // Count calls by direction
-        const directionStats = services.countCallsByDirection(callResult.rawData);
-        const summary = services.buildCallDirectionSummary(directionStats, { startDate, endDate });
-        
-        const result = {
-          success: true,
-          answer: summary,
-          callHistory: callResult.data,
-          directionStats: directionStats,
-          system: 'aivoice',
-          dateRange: { startDate, endDate }
-        };
-        
-        session.conversationHistory.push({
-          timestamp: new Date(),
-          question: question,
-          system: 'aivoice',
-          result: result
-        });
+  // ========== STEP 1: PREPROCESS LICENSE KEY ==========
+  const preprocessed = services.preprocessLicenseKeyFromQuestion(question);
+  
+  // Use the ACTUAL QUERY (without license key prefix) for all processing
+  const processQuery = preprocessed.actualQuery;
+  const extractedLicenseKey = preprocessed.licenseKey;
+  
+  console.log(`\n📊 PREPROCESSING RESULT:`);
+  console.log(`   Has License Key: ${preprocessed.hasLicenseKey}`);
+  if (preprocessed.hasLicenseKey) {
+    console.log(`   Extracted Key: ${extractedLicenseKey.substring(0, 40)}...`);
+    console.log(`   Processing Query: "${processQuery}"`);
+  }
 
-        return res.json({
-          success: true,
-          answer: result.answer,
-          callHistory: result.callHistory || [],
-          directionStats: result.directionStats,
-          system: 'aivoice',
-          sessionId: session.sessionId
-        });
-      }
+  // Resolve context from conversation history (using processed query)
+  const context = services.resolveFromContext(processQuery, session);
+  
+  // ========== INTELLIGENT ROUTING SYSTEM ==========
+  // STEP 2: Classify Intent (using processed query)
+  const intent = services.classifyAIVoiceIntent(processQuery);
+  
+  // STEP 3: Extract Entities (using processed query)
+  const entities = services.extractCallEntities(processQuery);
+  
+  // STEP 4: Check for special handlers
+  const isDirectionQuery = config.isCallDirectionQuery(processQuery);
+  
+  // STEP 5: Determine if we can handle with direct analysis
+  const hasExtractedEntities = Object.values(entities).some(v => v !== null);
+  const canHandleDirectly = intent && (
+    intent === 'filter' || 
+    intent === 'count' || 
+    intent === 'content' ||
+    intent === 'analysis' ||
+    hasExtractedEntities
+  );
+  
+  console.log(`   🎯 Can handle directly: ${canHandleDirectly} (intent: ${intent}, has entities: ${hasExtractedEntities})`);
+  
+  // ========== SPECIAL CASE: LICENSE KEY IN QUESTION ==========
+  if (preprocessed.hasLicenseKey) {
+    console.log(`\n🔑 LICENSE KEY QUERY DETECTED - Special Handler`);
+    console.log(`   Strategy: Fetch with hardcoded key → Filter by extracted key`);
+    
+    // Get date range
+    const startDate = entities.dates?.startDate || 
+                     context.dates?.startDate || 
+                     config.getCurrentDateInTimezone(config.TIMEZONE);
+    const endDate = entities.dates?.endDate || 
+                   context.dates?.endDate || 
+                   config.getCurrentDateInTimezone(config.TIMEZONE);
+    
+    console.log(`   📅 Date range: ${startDate} to ${endDate}`);
+    console.log(`   🔑 Hardcoded key used for API: ${config.HARDCODED_LICENSE_KEY.substring(0, 20)}...`);
+    console.log(`   🔍 Will filter results by: ${extractedLicenseKey.substring(0, 40)}...`);
+    
+    // STEP 1: Fetch ALL calls using HARDCODED LICENSE KEY
+    const callResult = await services.fetchCallDetails(startDate, endDate, false, false);
+    
+    if (!callResult.success) {
+      return res.status(500).json({
+        success: false,
+        error: callResult.error,
+        friendlyError: callResult.friendlyError,
+        system: 'aivoice',
+        sessionId: session.sessionId
+      });
+    }
+    
+    if (!callResult.rawData || callResult.rawData.length === 0) {
+      const answer = `No calls found for the date range ${startDate} to ${endDate}.`;
       
-      if (isLicenseQuery) {
-        console.log(`ðŸ”‘ Detected license key query (bypassing OpenAI)`);
-        
-        // Use resolved dates from context or current question
-        const startDate = context.dates?.startDate || config.getCurrentDateInTimezone(config.TIMEZONE);
-        const endDate = context.dates?.endDate || config.getCurrentDateInTimezone(config.TIMEZONE);
-        
-        // Log context usage
-        if (context.dates && !config.detectSingleDateFromQuestion(question)) {
-          console.log(`   ðŸ” Using date from conversation history: ${startDate} to ${endDate}`);
+      session.conversationHistory.push({
+        timestamp: new Date(),
+        question: question,
+        system: 'aivoice',
+        result: { 
+          success: true, 
+          answer: answer,
+          dateRange: { startDate, endDate },
+          extractedLicenseKey: extractedLicenseKey
         }
-        if (context.licenseKey && !services.extractLicenseKey(question)) {
-          console.log(`   ðŸ” Using license key from conversation history: ${extractedKey.substring(0, 20)}...`);
-        }
-        
-        console.log(`   Date range: ${startDate} to ${endDate}`);
-        
-        // Fetch call data
-        const callResult = await services.fetchCallDetails(startDate, endDate, false, false);
-        
-        if (!callResult.success) {
-          return res.status(500).json({
-            success: false,
-            error: callResult.error,
-            friendlyError: callResult.friendlyError,
-            system: 'aivoice',
-            sessionId: session.sessionId
-          });
-        }
-        
-        if (!callResult.rawData || callResult.rawData.length === 0) {
-          const answer = `No calls found for the date range ${startDate} to ${endDate}.`;
-          
-          session.conversationHistory.push({
-            timestamp: new Date(),
-            question: question,
-            system: 'aivoice',
-            result: { 
-              success: true, 
-              answer: answer,
-              dateRange: { startDate, endDate },
-              licenseKey: extractedKey
-            }
-          });
-          
-          return res.json({
-            success: true,
-            answer: answer,
-            callHistory: [],
-            system: 'aivoice',
-            sessionId: session.sessionId
-          });
-        }
-        
-        if (extractedKey) {
-          // User is asking about a specific license key
-          console.log(`   Looking for specific license key: ${extractedKey.substring(0, 20)}...`);
-          const licenseKeyResult = services.getCallsForLicenseKey(callResult.rawData, extractedKey);
-          
-          let answer;
-          if (licenseKeyResult.found) {
-            answer = `ðŸ”‘ **License Key Analysis**\n\n`;
-            answer += `**License Key:** \`${licenseKeyResult.licenseKey.substring(0, 40)}...\`\n`;
-            answer += `**Date Range:** ${startDate} to ${endDate}\n\n`;
-            answer += `ðŸ“Š **Statistics:**\n`;
-            answer += `- Total Calls: **${licenseKeyResult.count}**\n`;
-            answer += `- Total Cost: **$${licenseKeyResult.totalCost.toFixed(2)}**\n`;
-            answer += `- Average Duration: **${licenseKeyResult.avgDuration} seconds**\n`;
-          } else {
-            // Build helpful error message with available license keys
-            let answer = `❌ **No Calls Found**\n\n`;
-            answer += `**License Key:** \`${extractedKey.substring(0, 40)}...\`\n`;
-            answer += `**Date Range:** ${startDate} to ${endDate}\n\n`;
-            
-            if (licenseKeyResult.availableLicenseKeys && licenseKeyResult.availableLicenseKeys.length > 0) {
-              answer += `**💡 Available License Keys for this date range:**\n`;
-              licenseKeyResult.availableLicenseKeys.forEach((key, idx) => {
-                answer += `${idx + 1}. \`${key}\`\n`;
-              });
-              answer += `\n**Possible Issues:**\n`;
-              answer += `- The license key format might be different in the database\n`;
-              answer += `- This office might not have any calls for the selected date range\n`;
-              answer += `- Try selecting a different office from the dropdown\n`;
-            } else {
-              answer += `No calls found for license key \`${extractedKey.substring(0, 40)}...\` in the date range ${startDate} to ${endDate}.`;
-            }
-          }
-          
-          const result = {
-            success: true,
-            answer: answer,
-            callHistory: licenseKeyResult.calls || [],
-            licenseKeyStats: licenseKeyResult,
-            system: 'aivoice',
-            dateRange: { startDate, endDate },
-            licenseKey: extractedKey
-          };
-          
-          session.conversationHistory.push({
-            timestamp: new Date(),
-            question: question,
-            system: 'aivoice',
-            result: result
-          });
-
-          return res.json({
-            success: true,
-            answer: result.answer,
-            callHistory: result.callHistory || [],
-            licenseKeyStats: result.licenseKeyStats,
-            system: 'aivoice',
-            sessionId: session.sessionId
-          });
-        } else {
-          // User is asking for a breakdown by all license keys
-          console.log(`   Generating license key breakdown`);
-          const licenseKeySummary = services.buildLicenseKeySummary(callResult.rawData);
-          const grouped = services.groupCallsByLicenseKey(callResult.rawData);
-          
-          const result = {
-            success: true,
-            answer: licenseKeySummary,
-            callHistory: callResult.data,
-            licenseKeyBreakdown: grouped,
-            system: 'aivoice',
-            dateRange: { startDate, endDate }
-          };
-          
-          session.conversationHistory.push({
-            timestamp: new Date(),
-            question: question,
-            system: 'aivoice',
-            result: result
-          });
-
-          return res.json({
-            success: true,
-            answer: result.answer,
-            callHistory: result.callHistory || [],
-            licenseKeyBreakdown: result.licenseKeyBreakdown,
-            system: 'aivoice',
-            sessionId: session.sessionId
-          });
-        }
-      }
-
-      // Not a license key query or direction query, proceed with normal OpenAI flow
-      // Check if OpenAI API key is configured for general AI Voice questions
-      if (!config.OPENAI_API_KEY) {
-        return res.status(500).json({
-          success: false,
-          error: 'AI Voice system is not configured (missing OpenAI API key)',
-          friendlyError: 'AI Voice system is currently unavailable for general questions. However, I can still help you with specific queries about call counts, inbound/outbound calls, or license key breakdowns without OpenAI.\n\nExamples:\n- "How many inbound calls did we get today?"\n- "Show me calls by license key"\n- "How many calls yesterday?"'
-        });
-      }
-      
-      const prefilledDates = config.detectSingleDateFromQuestion(question);
-      
-      // Build conversation history for OpenAI context
-      const conversationMessages = [
-        {
-          role: 'system',
-          content: 'You are an AI assistant for PatientXpress AI voice call analysis. Provide clear, concise answers. IMPORTANT: When users ask follow-up questions without specifying dates, you MUST use the date range from the most recent query in the conversation. Look for date context provided in the user message.'
-        }
-      ];
-      
-      // Add recent conversation history for context (last 3 exchanges)
-      const recentHistory = session.conversationHistory.slice(-3);
-      for (const entry of recentHistory) {
-        if (entry.system === 'aivoice' && entry.question) {
-          conversationMessages.push({
-            role: 'user',
-            content: entry.question
-          });
-          
-          if (entry.result?.answer) {
-            conversationMessages.push({
-              role: 'assistant',
-              content: entry.result.answer
-            });
-          }
-        }
-      }
-      
-      // Resolve date context from history if not in current question
-      const contextDates = prefilledDates || (() => {
-        const recentDate = [...recentHistory].reverse().find(entry => 
-          entry.system === 'aivoice' && entry.result?.dateRange
-        );
-        return recentDate?.result?.dateRange || null;
-      })();
-      
-      // Log context usage
-      if (contextDates && !prefilledDates) {
-        console.log(`   ðŸ“… Using date context from conversation history: ${contextDates.startDate} to ${contextDates.endDate}`);
-      }
-      
-      // Add current question with explicit date context
-      let currentPrompt = question;
-      if (contextDates) {
-        currentPrompt += `\n\n[CONTEXT: Use date range ${contextDates.startDate} to ${contextDates.endDate} for this query]`;
-      }
-      
-      conversationMessages.push({
-        role: 'user',
-        content: currentPrompt
       });
       
-      // Build tool definition with smart defaults from context
-      const toolDescription = contextDates 
-        ? `Fetches AI Voice call records between startDate and endDate. If dates are not provided, use startDate="${contextDates.startDate}" and endDate="${contextDates.endDate}" from the current context.`
-        : 'Fetches AI Voice call records between startDate and endDate';
+      return res.json({
+        success: true,
+        answer: answer,
+        callHistory: [],
+        system: 'aivoice',
+        sessionId: session.sessionId
+      });
+    }
+    
+    console.log(`   ✅ Fetched ${callResult.rawData.length} total calls`);
+    
+    // STEP 2: Filter by extracted license key
+    const licenseKeyResult = services.getCallsForLicenseKey(
+      callResult.rawData, 
+      extractedLicenseKey
+    );
+    
+    if (!licenseKeyResult.found || licenseKeyResult.count === 0) {
+      // No calls found for this license key
+      let answer = `❌ **No Calls Found**\n\n`;
+      answer += `**License Key:** \`${extractedLicenseKey.substring(0, 40)}...\`\n`;
+      answer += `**Date Range:** ${startDate} to ${endDate}\n\n`;
+      answer += `**Query:** "${processQuery}"\n\n`;
       
-      const tools = [{
-        type: 'function',
-        function: {
-          name: 'aivoice_get_call_details',
-          description: toolDescription,
-          parameters: {
-            type: 'object',
-            properties: {
-              startDate: { 
-                type: 'string', 
-                description: contextDates 
-                  ? `Start date (YYYY-MM-DD). Default from context: ${contextDates.startDate}` 
-                  : 'Start date (YYYY-MM-DD)'
-              },
-              endDate: { 
-                type: 'string', 
-                description: contextDates 
-                  ? `End date (YYYY-MM-DD). Default from context: ${contextDates.endDate}` 
-                  : 'End date (YYYY-MM-DD)'
-              },
-              includeTranscript: { type: 'boolean', default: false },
-              includeAudio: { type: 'boolean', default: false }
-            },
-            required: contextDates ? [] : ['startDate', 'endDate']
-          }
-        }
-      }];
-
-      let aiResponse = await services.callOpenAI(conversationMessages, tools);
-      let responseMessage = aiResponse.choices[0].message;
-      let result;
-
-      if (responseMessage.tool_calls) {
-        const toolCall = responseMessage.tool_calls[0];
-        const functionArgs = JSON.parse(toolCall.function.arguments || '{}');
-        
-        // Use context dates as fallback if OpenAI didn't provide them
-        const startDate = functionArgs.startDate || contextDates?.startDate || config.getCurrentDateInTimezone(config.TIMEZONE);
-        const endDate = functionArgs.endDate || contextDates?.endDate || config.getCurrentDateInTimezone(config.TIMEZONE);
-        
-        console.log(`   ðŸ“… Using dates for API call: ${startDate} to ${endDate}`);
-        if (!functionArgs.startDate && contextDates) {
-          console.log(`   ðŸ”„ Dates came from conversation context`);
-        }
-
-        const callResult = await services.fetchCallDetails(
-          startDate,
-          endDate,
-          Boolean(functionArgs.includeTranscript),
-          Boolean(functionArgs.includeAudio)
-        );
-
-        // Check if call fetch failed and return friendly error
-        if (!callResult.success && callResult.friendlyError) {
-          session.conversationHistory.push({
-            timestamp: new Date(),
-            question: question,
-            system: 'aivoice',
-            result: { success: false, error: callResult.error }
-          });
-
-          return res.status(500).json({
-            success: false,
-            error: callResult.error,
-            friendlyError: callResult.friendlyError,
-            system: 'aivoice',
-            sessionId: session.sessionId
-          });
-        }
-
-        // ==================== FILTER BY LICENSE KEY ====================
-        // Check if a license key was extracted from the question
-        const extractedKey = services.extractLicenseKey(question);
-        let filteredCallData = callResult.rawData || callResult.data || [];
-        let licenseKeyInfo = null;
-        
-        if (extractedKey) {
-          console.log(`   🔑 Filtering calls by license key: ${extractedKey.substring(0, 20)}...`);
-          const licenseKeyResult = services.getCallsForLicenseKey(callResult.rawData || callResult.data, extractedKey);
-          
-          if (licenseKeyResult.found) {
-            filteredCallData = licenseKeyResult.calls;
-            licenseKeyInfo = {
-              licenseKey: extractedKey,
-              count: licenseKeyResult.count,
-              totalCost: licenseKeyResult.totalCost,
-              avgDuration: licenseKeyResult.avgDuration
-            };
-            console.log(`   ✅ Filtered to ${licenseKeyResult.count} calls for this license key`);
-          } else {
-            console.log(`   ⚠️ No calls found for license key: ${extractedKey.substring(0, 20)}...`);
-            filteredCallData = [];
-          }
-        } else {
-          console.log(`   ℹ️ No license key in query - using all calls`);
-        }
-        
-        // Build AI response context with filtered data
-        const callContext = services.buildConversationContext(filteredCallData);
-        
-        const aiToolPayload = {
-          success: callResult.success,
-          summary: callContext, // Use context built from FILTERED data
-          count: filteredCallData.length,
-          message: extractedKey 
-            ? `Fetched ${filteredCallData.length} calls for license key ${extractedKey.substring(0, 20)}...`
-            : `Fetched ${filteredCallData.length} calls.`,
-          licenseKeyFilter: extractedKey ? {
-            applied: true,
-            licenseKey: extractedKey.substring(0, 40) + '...',
-            matchedCalls: filteredCallData.length
-          } : { applied: false }
-        };
-
-        conversationMessages.push(responseMessage);
-        conversationMessages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          name: 'aivoice_get_call_details',
-          content: JSON.stringify(aiToolPayload)
+      if (licenseKeyResult.availableLicenseKeys && licenseKeyResult.availableLicenseKeys.length > 0) {
+        answer += `**💡 Available License Keys for this date range:**\n\n`;
+        licenseKeyResult.availableLicenseKeys.slice(0, 10).forEach((key, idx) => {
+          answer += `${idx + 1}. \`${key}\`\n`;
         });
-
-        aiResponse = await services.callOpenAI(conversationMessages, tools);
-        responseMessage = aiResponse.choices[0].message;
-
-        result = {
-          success: true,
-          answer: responseMessage.content,
-          callHistory: filteredCallData, // Use filtered data
-          system: 'aivoice',
-          dateRange: { startDate, endDate },
-          licenseKey: extractedKey || null,
-          licenseKeyInfo: licenseKeyInfo
-        };
-      } else {
-        result = {
-          success: true,
-          answer: responseMessage.content,
-          system: 'aivoice'
-        };
+        
+        if (licenseKeyResult.availableLicenseKeys.length > 10) {
+          answer += `\n*...and ${licenseKeyResult.availableLicenseKeys.length - 10} more*\n`;
+        }
       }
+      
+      session.conversationHistory.push({
+        timestamp: new Date(),
+        question: question,
+        system: 'aivoice',
+        result: { 
+          success: true, 
+          answer: answer,
+          dateRange: { startDate, endDate },
+          extractedLicenseKey: extractedLicenseKey,
+          found: false
+        }
+      });
+      
+      return res.json({
+        success: true,
+        answer: answer,
+        callHistory: [],
+        metadata: {
+          licenseKey: extractedLicenseKey,
+          found: false,
+          totalCallsFetched: callResult.rawData.length,
+          callsMatchingKey: 0
+        },
+        system: 'aivoice',
+        sessionId: session.sessionId
+      });
+    }
+    
+    // STEP 3: Build response based on intent
+    console.log(`   ✅ Found ${licenseKeyResult.count} calls for license key`);
+    
+    let answer;
+    
+    if (intent === 'count' || processQuery.toLowerCase().includes('how many')) {
+      // COUNT INTENT: Show statistics
+      answer = `## 🔑 License Key Query Results\n\n`;
+      answer += `**License Key:** \`${extractedLicenseKey.substring(0, 40)}...\`\n`;
+      answer += `**Date Range:** ${startDate} to ${endDate}\n`;
+      answer += `**Query:** "${processQuery}"\n\n`;
+      answer += `---\n\n`;
+      answer += `### 📊 Statistics\n\n`;
+      answer += `- **Total Calls:** ${licenseKeyResult.count}\n`;
+      answer += `- **Total Cost:** $${licenseKeyResult.totalCost.toFixed(2)}\n`;
+      answer += `- **Average Duration:** ${licenseKeyResult.avgDuration} seconds\n\n`;
+      
+      // Add breakdown by call direction if available
+      const inbound = licenseKeyResult.calls.filter(c => c.callDirection === 'inbound').length;
+      const outbound = licenseKeyResult.calls.filter(c => c.callDirection === 'outbound').length;
+      
+      if (inbound > 0 || outbound > 0) {
+        answer += `### 📞 Call Direction\n\n`;
+        answer += `- **Inbound:** ${inbound}\n`;
+        answer += `- **Outbound:** ${outbound}\n\n`;
+      }
+      
+    } else if (intent === 'content') {
+      // CONTENT INTENT: Show detailed call information
+      answer = services.formatCallDetails(licenseKeyResult.calls, processQuery);
+      
+    } else {
+      // FILTER/ANALYSIS INTENT: Show comprehensive analysis
+      answer = services.buildComprehensiveCallAnalysis(licenseKeyResult.calls, processQuery);
+    }
+    
+    const result = {
+      success: true,
+      answer: answer,
+      callHistory: licenseKeyResult.calls,
+      licenseKeyStats: licenseKeyResult,
+      system: 'aivoice',
+      dateRange: { startDate, endDate },
+      extractedLicenseKey: extractedLicenseKey,
+      metadata: {
+        intent: intent,
+        totalCallsFetched: callResult.rawData.length,
+        callsMatchingKey: licenseKeyResult.count
+      }
+    };
+    
+    session.conversationHistory.push({
+      timestamp: new Date(),
+      question: question,
+      system: 'aivoice',
+      result: result
+    });
 
+    return res.json({
+      success: true,
+      answer: result.answer,
+      callHistory: result.callHistory || [],
+      licenseKeyStats: result.licenseKeyStats,
+      metadata: result.metadata,
+      system: 'aivoice',
+      sessionId: session.sessionId
+    });
+  }
+  
+  // ========== HANDLER 1: Call Direction Queries (NO LICENSE KEY) ==========
+  if (isDirectionQuery) {
+    console.log(`📞 Detected call direction query (bypassing OpenAI)`);
+    
+    const startDate = context.dates?.startDate || config.getCurrentDateInTimezone(config.TIMEZONE);
+    const endDate = context.dates?.endDate || config.getCurrentDateInTimezone(config.TIMEZONE);
+    
+    console.log(`   Date range: ${startDate} to ${endDate}`);
+    
+    const callResult = await services.fetchCallDetails(startDate, endDate, false, false);
+    
+    if (!callResult.success) {
+      return res.status(500).json({
+        success: false,
+        error: callResult.error,
+        friendlyError: callResult.friendlyError,
+        system: 'aivoice',
+        sessionId: session.sessionId
+      });
+    }
+    
+    if (!callResult.rawData || callResult.rawData.length === 0) {
+      const answer = `No calls found for the date range ${startDate} to ${endDate}.`;
+      
+      session.conversationHistory.push({
+        timestamp: new Date(),
+        question: question,
+        system: 'aivoice',
+        result: { 
+          success: true, 
+          answer: answer,
+          dateRange: { startDate, endDate }
+        }
+      });
+      
+      return res.json({
+        success: true,
+        answer: answer,
+        callHistory: [],
+        system: 'aivoice',
+        sessionId: session.sessionId
+      });
+    }
+    
+    const directionStats = services.countCallsByDirection(callResult.rawData);
+    const summary = services.buildCallDirectionSummary(directionStats, { startDate, endDate });
+    
+    const result = {
+      success: true,
+      answer: summary,
+      callHistory: callResult.data,
+      directionStats: directionStats,
+      system: 'aivoice',
+      dateRange: { startDate, endDate }
+    };
+    
+    session.conversationHistory.push({
+      timestamp: new Date(),
+      question: question,
+      system: 'aivoice',
+      result: result
+    });
+
+    return res.json({
+      success: true,
+      answer: result.answer,
+      callHistory: result.callHistory || [],
+      directionStats: result.directionStats,
+      system: 'aivoice',
+      sessionId: session.sessionId
+    });
+  }
+  
+  // ========== HANDLER 2: Intelligent Entity-Based Analysis ==========
+  // ========== HANDLER 2: Intelligent Entity-Based Analysis (NO LICENSE KEY) ==========
+  if (canHandleDirectly && !isDirectionQuery) {
+    console.log(`🎯 Using intelligent entity-based analysis`);
+    
+    // Get date range (from entities, context, or current question)
+    const startDate = entities.dates?.startDate || 
+                     context.dates?.startDate || 
+                     config.getCurrentDateInTimezone(config.TIMEZONE);
+    const endDate = entities.dates?.endDate || 
+                   context.dates?.endDate || 
+                   config.getCurrentDateInTimezone(config.TIMEZONE);
+    
+    console.log(`   📅 Date range: ${startDate} to ${endDate}`);
+    
+    // Fetch call data (include transcripts if content intent)
+    const includeTranscripts = intent === 'content';
+    const callResult = await services.fetchCallDetails(startDate, endDate, includeTranscripts, false);
+    
+    if (!callResult.success) {
+      return res.status(500).json({
+        success: false,
+        error: callResult.error,
+        friendlyError: callResult.friendlyError,
+        system: 'aivoice',
+        sessionId: session.sessionId
+      });
+    }
+    
+    if (!callResult.rawData || callResult.rawData.length === 0) {
+      const answer = `No calls found for the date range ${startDate} to ${endDate}.`;
+      
+      return res.json({
+        success: true,
+        answer: answer,
+        callHistory: [],
+        system: 'aivoice',
+        sessionId: session.sessionId
+      });
+    }
+    
+    // Filter using intelligent entity-based system
+    const filteredCalls = services.filterCallsByEntities(callResult.rawData, entities);
+    
+    // Build response based on intent (use processQuery instead of question)
+    let analysis;
+    if (intent === 'content') {
+      // User wants transcripts, summaries, or detailed content
+      analysis = services.formatCallDetails(filteredCalls, processQuery);
+    } else {
+      // User wants analysis, statistics, or filtered lists
+      analysis = services.buildComprehensiveCallAnalysis(filteredCalls, processQuery);
+    }
+    
+    const result = {
+      success: true,
+      answer: analysis,
+      callHistory: filteredCalls,
+      system: 'aivoice',
+      dateRange: { startDate, endDate },
+      intent: intent,
+      entities: entities,
+      filteredCount: filteredCalls.length,
+      totalCount: callResult.rawData.length
+    };
+    
+    session.conversationHistory.push({
+      timestamp: new Date(),
+      question: question,
+      system: 'aivoice',
+      result: result
+    });
+
+    return res.json({
+      success: true,
+      answer: result.answer,
+      callHistory: result.callHistory || [],
+      metadata: {
+        intent: intent,
+        filteredCount: result.filteredCount,
+        totalCount: result.totalCount
+      },
+      system: 'aivoice',
+      sessionId: session.sessionId
+    });
+  }
+  
+  // ========== HANDLER 3: License Key Queries ==========
+  if (isLicenseQuery) {
+    console.log(`🔑 Detected license key query (bypassing OpenAI)`);
+    
+    const startDate = context.dates?.startDate || config.getCurrentDateInTimezone(config.TIMEZONE);
+    const endDate = context.dates?.endDate || config.getCurrentDateInTimezone(config.TIMEZONE);
+    
+    console.log(`   Date range: ${startDate} to ${endDate}`);
+    
+    const callResult = await services.fetchCallDetails(startDate, endDate, false, false);
+    
+    if (!callResult.success) {
+      return res.status(500).json({
+        success: false,
+        error: callResult.error,
+        friendlyError: callResult.friendlyError,
+        system: 'aivoice',
+        sessionId: session.sessionId
+      });
+    }
+    
+    if (!callResult.rawData || callResult.rawData.length === 0) {
+      const answer = `No calls found for the date range ${startDate} to ${endDate}.`;
+      
+      session.conversationHistory.push({
+        timestamp: new Date(),
+        question: question,
+        system: 'aivoice',
+        result: { 
+          success: true, 
+          answer: answer,
+          dateRange: { startDate, endDate },
+          licenseKey: extractedKey
+        }
+      });
+      
+      return res.json({
+        success: true,
+        answer: answer,
+        callHistory: [],
+        system: 'aivoice',
+        sessionId: session.sessionId
+      });
+    }
+    
+    if (extractedKey) {
+      console.log(`   Looking for specific license key: ${extractedKey.substring(0, 20)}...`);
+      const licenseKeyResult = services.getCallsForLicenseKey(callResult.rawData, extractedKey);
+      
+      let answer;
+      if (licenseKeyResult.found) {
+        answer = `🔑 **License Key Analysis**\n\n`;
+        answer += `**License Key:** \`${licenseKeyResult.licenseKey.substring(0, 40)}...\`\n`;
+        answer += `**Date Range:** ${startDate} to ${endDate}\n\n`;
+        answer += `📊 **Statistics:**\n`;
+        answer += `- Total Calls: **${licenseKeyResult.count}**\n`;
+        answer += `- Total Cost: **$${licenseKeyResult.totalCost.toFixed(2)}**\n`;
+        answer += `- Average Duration: **${licenseKeyResult.avgDuration} seconds**\n`;
+      } else {
+        answer = `❌ **No Calls Found**\n\n`;
+        answer += `**License Key:** \`${extractedKey.substring(0, 40)}...\`\n`;
+        answer += `**Date Range:** ${startDate} to ${endDate}\n\n`;
+        
+        if (licenseKeyResult.availableLicenseKeys && licenseKeyResult.availableLicenseKeys.length > 0) {
+          answer += `**💡 Available License Keys for this date range:**\n`;
+          licenseKeyResult.availableLicenseKeys.forEach((key, idx) => {
+            answer += `${idx + 1}. \`${key}\`\n`;
+          });
+        }
+      }
+      
+      const result = {
+        success: true,
+        answer: answer,
+        callHistory: licenseKeyResult.calls || [],
+        licenseKeyStats: licenseKeyResult,
+        system: 'aivoice',
+        dateRange: { startDate, endDate },
+        licenseKey: extractedKey
+      };
+      
       session.conversationHistory.push({
         timestamp: new Date(),
         question: question,
@@ -583,13 +640,63 @@ app.post('/api/chat', async (req, res) => {
         success: true,
         answer: result.answer,
         callHistory: result.callHistory || [],
+        licenseKeyStats: result.licenseKeyStats,
+        system: 'aivoice',
+        sessionId: session.sessionId
+      });
+    } else {
+      console.log(`   Generating license key breakdown`);
+      const licenseKeySummary = services.buildLicenseKeySummary(callResult.rawData);
+      const grouped = services.groupCallsByLicenseKey(callResult.rawData);
+      
+      const result = {
+        success: true,
+        answer: licenseKeySummary,
+        callHistory: callResult.data,
+        licenseKeyBreakdown: grouped,
+        system: 'aivoice',
+        dateRange: { startDate, endDate }
+      };
+      
+      session.conversationHistory.push({
+        timestamp: new Date(),
+        question: question,
+        system: 'aivoice',
+        result: result
+      });
+
+      return res.json({
+        success: true,
+        answer: result.answer,
+        callHistory: result.callHistory || [],
+        licenseKeyBreakdown: result.licenseKeyBreakdown,
         system: 'aivoice',
         sessionId: session.sessionId
       });
     }
+  }
+  
+  // If we get here, it's a general AI Voice question that needs OpenAI
+  // Return a friendly message if OpenAI is not configured
+  if (!config.OPENAI_API_KEY) {
+    return res.status(500).json({
+      success: false,
+      error: 'AI Voice system requires OpenAI API key for this type of query',
+      friendlyError: 'I can help with specific queries like:\n- "How many calls today?"\n- "Show calls with upsell opportunities"\n- "Which calls had negative sentiment?"\n\nFor general conversational questions, OpenAI API key is required.'
+    });
+  }
+  
+  // For other general questions, respond with a helpful message
+  return res.json({
+    success: true,
+    answer: `I can help you analyze call data! Try asking:\n\n📊 **Analytics:**\n- "How many calls today?"\n- "Show calls by license key"\n- "Which calls had upsell opportunities?"\n\n📝 **Content:**\n- "Show transcripts for today"\n- "Give me call summaries"\n- "Show AI review feedback"\n\n🎯 **Filtering:**\n- "Show calls with negative sentiment"\n- "Which calls need follow-up?"\n- "Show unsuccessful appointments"`,
+    system: 'aivoice',
+    sessionId: session.sessionId
+  });
+}
 
   } catch (error) {
-    console.error('ðŸ’¥ Error in unified chat:', error);
+    console.error('❌ Error in unified chat:', error);
     res.status(500).json({
       success: false,
       error: 'An unexpected error occurred',
@@ -929,11 +1036,11 @@ app.listen(config.PORT, async () => {
   console.log(`\nâ° Timezone Configuration:`);
   console.log(`   Current timezone: ${config.TIMEZONE}`);
   console.log(`   Current date: ${config.getCurrentDateInTimezone(config.TIMEZONE)}`);
-  console.log(`\nðŸ”µ TXQL System (Database Queries):`);
+  console.log(`\n 🧭TXQL System (Database Queries):`);
   console.log(`   Questions: users, tables, orders, California, age, etc.`);
-  console.log(`\nðŸŸ¢ AI Voice System (Call Analysis):`);
+  console.log(`\n 🎙️ AI Voice System (Call Analysis):`);
   console.log(`   Questions: calls, appointments, patients, sentiment, license keys, etc.`);
-  console.log(`\nðŸ“‹ Legacy Endpoints:`);
+  console.log(`\n 📋 Legacy Endpoints:`);
   console.log(`   â†’ POST http://localhost:${config.PORT}/api/txql/chat (TXQL only)`);
   console.log(`   â†’ POST http://localhost:${config.PORT}/api/ask (AI Voice only)`);
   console.log(`\nðŸ’š Health: http://localhost:${config.PORT}/api/health`);
