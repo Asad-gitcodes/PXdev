@@ -1115,13 +1115,120 @@ function extractPatientNumber(queryResults) {
 
 // ==================== END PAYMENT ANALYZER ====================
 
+// ==================== CHART DETECTION ====================
+
 /**
- * Format SQL results for display
+ * Detect if data should be visualized as a chart
+ * Returns chart configuration or null
  */
+function detectChartData(rows, columns) {
+  if (!rows || rows.length === 0 || rows.length > 100) return null;
+  
+  console.log(`   📊 Analyzing data for chart potential...`);
+  console.log(`      Rows: ${rows.length}, Columns: ${columns.length}`);
+  
+  // Find date columns
+  const dateColumns = columns.filter(col => {
+    const sample = rows[0][col];
+    return sample && (
+      /^\d{4}-\d{2}-\d{2}/.test(String(sample)) ||
+      col.toLowerCase().includes('date') ||
+      col.toLowerCase().includes('time')
+    );
+  });
+  
+  // Find numeric columns
+  const numericColumns = columns.filter(col => {
+    return rows.slice(0, 5).every(row => {
+      const val = row[col];
+      return typeof val === 'number' || (!isNaN(parseFloat(val)) && val !== null && val !== '');
+    });
+  });
+  
+  console.log(`      Date columns: ${dateColumns.join(', ') || 'none'}`);
+  console.log(`      Numeric columns: ${numericColumns.join(', ') || 'none'}`);
+  
+  // TIME SERIES: Date + Number
+  if (dateColumns.length > 0 && numericColumns.length > 0) {
+    const dateCol = dateColumns[0];
+    const valueCol = numericColumns[0];
+    
+    console.log(`   ✅ Chart detected: LINE chart (${dateCol} vs ${valueCol})`);
+    
+    return {
+      type: 'line',
+      data: rows.map(row => ({
+        date: String(row[dateCol]),
+        value: parseFloat(row[valueCol]) || 0,
+        label: String(row[dateCol])
+      })),
+      config: {
+        xKey: 'date',
+        yKey: 'value',
+        title: `${valueCol} over time`,
+        xLabel: dateCol,
+        yLabel: valueCol
+      }
+    };
+  }
+  
+  // CATEGORY COMPARISON: Text + Number
+  const categoryColumns = columns.filter(col => {
+    const uniqueValues = new Set(rows.map(r => r[col]));
+    return uniqueValues.size > 1 && uniqueValues.size <= 20 && !dateColumns.includes(col);
+  });
+  
+  if (categoryColumns.length > 0 && numericColumns.length > 0) {
+    const catCol = categoryColumns[0];
+    const valueCol = numericColumns[0];
+    
+    console.log(`   ✅ Chart detected: BAR chart (${catCol} vs ${valueCol})`);
+    
+    return {
+      type: 'bar',
+      data: rows.map(row => ({
+        category: String(row[catCol]),
+        value: parseFloat(row[valueCol]) || 0
+      })),
+      config: {
+        xKey: 'category',
+        yKey: 'value',
+        title: `${valueCol} by ${catCol}`,
+        xLabel: catCol,
+        yLabel: valueCol
+      }
+    };
+  }
+  
+  // SENTIMENT/STATUS BREAKDOWN: Counts (PIE CHART)
+  if (rows.length <= 10 && numericColumns.length > 0) {
+    const labelCol = columns[0];
+    const valueCol = numericColumns[0];
+    
+    console.log(`   ✅ Chart detected: PIE chart (${labelCol} distribution)`);
+    
+    return {
+      type: 'pie',
+      data: rows.map(row => ({
+        name: String(row[labelCol]),
+        value: parseFloat(row[valueCol]) || 0
+      })),
+      config: {
+        title: `Distribution of ${labelCol}`
+      }
+    };
+  }
+  
+  console.log(`   ℹ️  No chart pattern detected`);
+  return null;
+}
+
+// ==================== END CHART DETECTION ====================
+
 /**
- * Format SQL results for display
+ * Format SQL results for display - WITH CHART DETECTION
  */
-function formatSQLResults(sqlResults, sqlQuery, originalQuestion = '') {
+async function formatSQLResults(sqlResults, sqlQuery, originalQuestion = '') {
   if (!sqlResults.success || !sqlResults.data) {
     let errorOutput = `## âŒ Query Execution Failed\n\n`;
     errorOutput += `**Error:** ${sqlResults.error || 'Unknown error'}\n\n`;
@@ -1272,6 +1379,23 @@ ${sqlQuery}
     }
   }
   // ========== END: Pricing analysis detection ==========
+  
+  // ========== NEW: CHART DETECTION ==========
+  const chartData = detectChartData(rows, columns);
+  
+  if (chartData) {
+    console.log(`   📊 Chart will be generated: ${chartData.type}`);
+    
+    // Generate text output
+    const textOutput = formatCleanResults(rows, columns, sqlQuery);
+    
+    // Return object with both text and chart data
+    return {
+      text: textOutput,
+      chart: chartData
+    };
+  }
+  // ========== END: Chart detection ==========
   
   // Generate clean, structured output - NO MORE BROKEN TABLES
   return formatCleanResults(rows, columns, sqlQuery);
@@ -4242,6 +4366,288 @@ function filterCallsByEntities(calls, entities) {
 
 // ==================== EXPORTS ====================
 
+// ==================== CHART DATA GENERATION ====================
+
+/**
+ * Generate chart data based on question and response data
+ * This function detects if a response should include visualizations
+ * 
+ * @param {string} question - The user's question
+ * @param {Array} data - The raw data array from API response
+ * @param {string} systemType - The system that generated the response ('aivoice', 'txql', 'commlog')
+ * @returns {Object|null} - Chart configuration object or null if no chart applicable
+ */
+function generateChartData(question, data, systemType) {
+  if (!data || !Array.isArray(data) || data.length === 0) {
+    return null;
+  }
+
+  const lowerQ = question.toLowerCase();
+  
+  // ========== AI VOICE SYSTEM CHARTS ==========
+  if (systemType === 'aivoice') {
+    
+    // CHART 1: Sentiment Distribution (Pie Chart)
+    if (lowerQ.includes('sentiment')) {
+      const sentiments = {};
+      data.forEach(call => {
+        const sentiment = call.sentiments || call.user_sentiment || 'Unknown';
+        sentiments[sentiment] = (sentiments[sentiment] || 0) + 1;
+      });
+      
+      // Only create chart if we have data
+      if (Object.keys(sentiments).length > 0) {
+        return {
+          type: 'pie',
+          title: 'Sentiment Distribution',
+          data: Object.entries(sentiments).map(([name, value]) => ({
+            name,
+            value,
+            color: name.toLowerCase().includes('positive') ? '#22c55e' : 
+                   name.toLowerCase().includes('negative') ? '#ef4444' : '#6b7280'
+          }))
+        };
+      }
+    }
+    
+    // CHART 2: Call Direction (Pie Chart)
+    if (lowerQ.includes('direction') || lowerQ.includes('inbound') || lowerQ.includes('outbound')) {
+      const directions = { inbound: 0, outbound: 0, unknown: 0 };
+      data.forEach(call => {
+        const dir = (call.callDirection || call.call_type || '').toLowerCase();
+        if (dir === 'inbound' || dir === 'incoming') {
+          directions.inbound++;
+        } else if (dir === 'outbound' || dir === 'outgoing') {
+          directions.outbound++;
+        } else {
+          directions.unknown++;
+        }
+      });
+      
+      // Filter out zero values
+      const chartData = Object.entries(directions)
+        .filter(([_, value]) => value > 0)
+        .map(([name, value]) => ({
+          name: name.charAt(0).toUpperCase() + name.slice(1),
+          value,
+          color: name === 'inbound' ? '#3b82f6' : 
+                 name === 'outbound' ? '#8b5cf6' : '#9ca3af'
+        }));
+      
+      if (chartData.length > 0) {
+        return {
+          type: 'pie',
+          title: 'Call Direction Breakdown',
+          data: chartData
+        };
+      }
+    }
+    
+    // CHART 3: Calls by License Key (Bar Chart)
+    if (lowerQ.includes('license key') || lowerQ.includes('by license')) {
+      const grouped = {};
+      data.forEach(call => {
+        const key = call.licenseKey || 'Unknown';
+        const shortKey = key.length > 20 ? key.substring(0, 20) + '...' : key;
+        grouped[shortKey] = (grouped[shortKey] || 0) + 1;
+      });
+      
+      const chartData = Object.entries(grouped)
+        .map(([name, value]) => ({ name, value }))
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 10); // Top 10 only
+      
+      if (chartData.length > 0) {
+        return {
+          type: 'bar',
+          title: 'Calls by License Key (Top 10)',
+          data: chartData
+        };
+      }
+    }
+    
+    // CHART 4: Appointment Outcomes (Pie Chart)
+    if (lowerQ.includes('appointment') && !lowerQ.includes('how many')) {
+      const outcomes = {
+        booked: 0,
+        rescheduled: 0,
+        cancelled: 0,
+        none: 0
+      };
+      
+      data.forEach(call => {
+        if (call.isAppointmentBooked === 1 || call.appt_booked === '1') {
+          outcomes.booked++;
+        } else if (call.isAppointmentRescheduled === 1) {
+          outcomes.rescheduled++;
+        } else if (call.isAppointmentCancelled === 1) {
+          outcomes.cancelled++;
+        } else {
+          outcomes.none++;
+        }
+      });
+      
+      const chartData = Object.entries(outcomes)
+        .filter(([_, value]) => value > 0)
+        .map(([name, value]) => ({
+          name: name.charAt(0).toUpperCase() + name.slice(1),
+          value,
+          color: name === 'booked' ? '#22c55e' :
+                 name === 'rescheduled' ? '#f59e0b' :
+                 name === 'cancelled' ? '#ef4444' : '#6b7280'
+        }));
+      
+      if (chartData.length > 1) { // Only show if there's variety
+        return {
+          type: 'pie',
+          title: 'Appointment Outcomes',
+          data: chartData
+        };
+      }
+    }
+    
+    // CHART 5: Call Success Rate (Pie Chart)
+    if (lowerQ.includes('success') && !lowerQ.includes('upsell')) {
+      const success = { successful: 0, unsuccessful: 0 };
+      data.forEach(call => {
+        if (call.call_successful === '1' || call.call_successful === 'true') {
+          success.successful++;
+        } else if (call.call_successful === '0' || call.call_successful === 'false') {
+          success.unsuccessful++;
+        }
+      });
+      
+      if (success.successful > 0 || success.unsuccessful > 0) {
+        return {
+          type: 'pie',
+          title: 'Call Success Rate',
+          data: [
+            { name: 'Successful', value: success.successful, color: '#22c55e' },
+            { name: 'Unsuccessful', value: success.unsuccessful, color: '#ef4444' }
+          ].filter(item => item.value > 0)
+        };
+      }
+    }
+    
+    // CHART 6: Quality Scores (Pie Chart)
+    if (lowerQ.includes('thumbs') || lowerQ.includes('quality') || lowerQ.includes('feedback')) {
+      const quality = { thumbsUp: 0, thumbsDown: 0, noFeedback: 0 };
+      data.forEach(call => {
+        if (call.thumbs_up === '1') {
+          quality.thumbsUp++;
+        } else if (call.thumbs_down === '1') {
+          quality.thumbsDown++;
+        } else {
+          quality.noFeedback++;
+        }
+      });
+      
+      const chartData = [
+        { name: 'Thumbs Up', value: quality.thumbsUp, color: '#22c55e' },
+        { name: 'Thumbs Down', value: quality.thumbsDown, color: '#ef4444' },
+        { name: 'No Feedback', value: quality.noFeedback, color: '#6b7280' }
+      ].filter(item => item.value > 0);
+      
+      if (chartData.length > 1) {
+        return {
+          type: 'pie',
+          title: 'Quality Feedback',
+          data: chartData
+        };
+      }
+    }
+    
+    // CHART 7: Language Distribution (Pie Chart)
+    if (lowerQ.includes('language')) {
+      const languages = {};
+      data.forEach(call => {
+        const lang = call.languageUsed || 'Unknown';
+        languages[lang] = (languages[lang] || 0) + 1;
+      });
+      
+      const chartData = Object.entries(languages)
+        .map(([name, value]) => ({ name, value }))
+        .sort((a, b) => b.value - a.value);
+      
+      if (chartData.length > 0) {
+        return {
+          type: 'pie',
+          title: 'Language Distribution',
+          data: chartData
+        };
+      }
+    }
+  }
+  
+  // ========== COMMLOG SYSTEM CHARTS ==========
+  if (systemType === 'commlog') {
+    
+    // CHART 1: Communication Types (Bar Chart)
+    if (lowerQ.includes('type') || lowerQ.includes('commlog')) {
+      const types = {};
+      data.forEach(record => {
+        const type = getCommTypeLabel(record.CommType);
+        types[type] = (types[type] || 0) + 1;
+      });
+      
+      const chartData = Object.entries(types)
+        .map(([name, value]) => ({ 
+          name: name.replace(/[📋📧📞💬🎯📊]/g, '').trim(), // Remove emojis
+          value 
+        }))
+        .sort((a, b) => b.value - a.value);
+      
+      if (chartData.length > 0) {
+        return {
+          type: 'bar',
+          title: 'Communication Types',
+          data: chartData
+        };
+      }
+    }
+    
+    // CHART 2: Sent vs Received (Pie Chart)
+    if (lowerQ.includes('sent') || lowerQ.includes('received')) {
+      const direction = { sent: 0, received: 0, unknown: 0 };
+      data.forEach(record => {
+        if (record.SentOrReceived === 1) {
+          direction.sent++;
+        } else if (record.SentOrReceived === 2) {
+          direction.received++;
+        } else {
+          direction.unknown++;
+        }
+      });
+      
+      const chartData = Object.entries(direction)
+        .filter(([_, value]) => value > 0)
+        .map(([name, value]) => ({
+          name: name.charAt(0).toUpperCase() + name.slice(1),
+          value,
+          color: name === 'sent' ? '#3b82f6' : 
+                 name === 'received' ? '#8b5cf6' : '#6b7280'
+        }));
+      
+      if (chartData.length > 0) {
+        return {
+          type: 'pie',
+          title: 'Communication Direction',
+          data: chartData
+        };
+      }
+    }
+  }
+  
+  // ========== TXQL SYSTEM CHARTS ==========
+  if (systemType === 'txql') {
+    // TXQL charts would need more context about the query results
+    // For now, return null (can be expanded later)
+    return null;
+  }
+  
+  return null; // No chart applicable
+}
+
 module.exports = {
   // Session management
   generateSessionId,
@@ -4313,6 +4719,7 @@ module.exports = {
   analyzeDataForVisualization,
   generateChartVisualization,
   formatChartLabel,
+  detectChartData,  // NEW: Chart detection
   
   // AI Voice functions
   normalizeCall,
@@ -4341,7 +4748,10 @@ module.exports = {
   // NEW: Intelligent NLP routing
   classifyAIVoiceIntent,
   extractCallEntities,
-  filterCallsByEntities
+  filterCallsByEntities,
+  
+  // NEW: Chart generation
+  generateChartData
 };
 // ==================== COMMLOG FUNCTIONS ====================
 

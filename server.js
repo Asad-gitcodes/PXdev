@@ -132,6 +132,10 @@ app.post('/api/chat', async (req, res) => {
         }
         
         // For non-CommLog data, return as before
+        // ========== NEW: CHART DATA HANDLING ==========
+        // Check if result.data contains chart information
+        const hasChart = result.data && typeof result.data === 'object' && result.data.chart;
+        
         session.conversationHistory.push({
           timestamp: new Date(),
           question: question,
@@ -139,13 +143,15 @@ app.post('/api/chat', async (req, res) => {
           result: {
             ...result,
             customKeyUsed: txqlPreprocessed.hasTXQLKey,
-            licenseKey: txqlKey
+            licenseKey: txqlKey,
+            chartData: hasChart ? result.data.chart : null  // Store chart in history
           }
         });
 
         return res.json({
           success: true,
-          answer: result.data,
+          answer: hasChart ? result.data.text : result.data,  // Extract text if chart present
+          chartData: hasChart ? result.data.chart : null,      // NEW: Include chart data
           sqlQuery: result.sqlQuery,
           executionResults: result.executionResults,
           customKeyUsed: txqlPreprocessed.hasTXQLKey,
@@ -355,11 +361,15 @@ if (targetSystem === 'aivoice') {
       answer = services.buildComprehensiveCallAnalysis(licenseKeyResult.calls, processQuery);
     }
     
+    // Generate chart data for visualization
+    const chartData = services.generateChartData(question, licenseKeyResult.calls, 'aivoice');
+    
     const result = {
       success: true,
       answer: answer,
       callHistory: licenseKeyResult.calls,
       licenseKeyStats: licenseKeyResult,
+      chartData: chartData,
       system: 'aivoice',
       dateRange: { startDate, endDate },
       extractedLicenseKey: extractedLicenseKey,
@@ -382,6 +392,7 @@ if (targetSystem === 'aivoice') {
       answer: result.answer,
       callHistory: result.callHistory || [],
       licenseKeyStats: result.licenseKeyStats,
+      chartData: chartData,
       metadata: result.metadata,
       system: 'aivoice',
       sessionId: session.sessionId
@@ -435,11 +446,15 @@ if (targetSystem === 'aivoice') {
     const directionStats = services.countCallsByDirection(callResult.rawData);
     const summary = services.buildCallDirectionSummary(directionStats, { startDate, endDate });
     
+    // Generate chart data for visualization
+    const chartData = services.generateChartData(question, callResult.rawData, 'aivoice');
+    
     const result = {
       success: true,
       answer: summary,
       callHistory: callResult.data,
       directionStats: directionStats,
+      chartData: chartData,
       system: 'aivoice',
       dateRange: { startDate, endDate }
     };
@@ -456,6 +471,7 @@ if (targetSystem === 'aivoice') {
       answer: result.answer,
       callHistory: result.callHistory || [],
       directionStats: result.directionStats,
+      chartData: chartData,
       system: 'aivoice',
       sessionId: session.sessionId
     });
@@ -515,10 +531,14 @@ if (targetSystem === 'aivoice') {
       analysis = services.buildComprehensiveCallAnalysis(filteredCalls, processQuery);
     }
     
+    // Generate chart data for visualization
+    const chartData = services.generateChartData(question, filteredCalls, 'aivoice');
+    
     const result = {
       success: true,
       answer: analysis,
       callHistory: filteredCalls,
+      chartData: chartData,
       system: 'aivoice',
       dateRange: { startDate, endDate },
       intent: intent,
@@ -538,6 +558,7 @@ if (targetSystem === 'aivoice') {
       success: true,
       answer: result.answer,
       callHistory: result.callHistory || [],
+      chartData: chartData,
       metadata: {
         intent: intent,
         filteredCount: result.filteredCount,
@@ -761,12 +782,16 @@ app.post('/api/commlog/analyze', async (req, res) => {
     const analysis = services.analyzeCommLog(records);
     const phoneCallDetails = services.extractPhoneCallDetails(records);
     
+    // Generate chart data for visualization
+    const chartData = services.generateChartData('commlog analysis', records, 'commlog');
+    
     return res.json({
       success: true,
       patNum: patNum,
       recordCount: records.length,
       analysis: analysis,
       phoneCalls: phoneCallDetails,
+      chartData: chartData,
       formattedRecords: analysis.formattedRecords.slice(0, 50), // Clean, readable format
       rawRecords: records.slice(0, 50) // Original data if needed
     });
@@ -823,6 +848,9 @@ app.post('/api/aivoice/license-keys', async (req, res) => {
       // Analyze specific license key
       const result = services.getCallsForLicenseKey(callResult.rawData, licenseKey);
       
+      // Generate chart data for specific license key
+      const chartData = services.generateChartData('license key analysis', result.calls || [], 'aivoice');
+      
       return res.json({
         success: result.found,
         message: result.message,
@@ -830,19 +858,24 @@ app.post('/api/aivoice/license-keys', async (req, res) => {
         callCount: result.count,
         totalCost: result.totalCost,
         avgDuration: result.avgDuration,
-        calls: result.calls
+        calls: result.calls,
+        chartData: chartData
       });
     } else {
       // Return breakdown of all license keys
       const grouped = services.groupCallsByLicenseKey(callResult.rawData);
       const summary = services.buildLicenseKeySummary(callResult.rawData);
       
+      // Generate chart data for all license keys
+      const chartData = services.generateChartData('license key breakdown', callResult.rawData, 'aivoice');
+      
       return res.json({
         success: true,
         summary: summary,
         breakdown: grouped,
         totalCalls: callResult.rawData.length,
-        uniqueLicenseKeys: Object.keys(grouped).length
+        uniqueLicenseKeys: Object.keys(grouped).length,
+        chartData: chartData
       });
     }
   } catch (error) {
