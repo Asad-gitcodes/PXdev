@@ -166,7 +166,7 @@ async function testAIVoiceConnection() {
     yesterday.setDate(yesterday.getDate() - 1);
     const dateStr = yesterday.toISOString().split('T')[0];
     
-    const url = `${config.BASE_URL}/api/config/get/aivoice/detail`;
+    const url = `${config.BASE_URL}${config.AIVOICE_DETAIL_GET_PATH}`;
     const response = await axios.get(url, {
       params: {
         licenseKey: config.HARDCODED_LICENSE_KEY,
@@ -212,6 +212,92 @@ async function testAIVoiceConnection() {
     }
     console.error(`   ðŸ’¡ Call analysis features will NOT work until AI Voice API is available`);
     return false;
+  }
+}
+
+function normalizeReviewFlag(value) {
+  if (value === true || value === 1 || value === '1') return '1';
+  if (value === false || value === 0 || value === '0') return '0';
+  return undefined;
+}
+
+async function updateAIVoiceReviewStatus({ aiVoiceMetaId, checked, pxReviewed }) {
+  const normalizedChecked = normalizeReviewFlag(checked);
+  const normalizedPxReviewed = normalizeReviewFlag(pxReviewed);
+
+  if (!aiVoiceMetaId) {
+    throw new Error('aiVoiceMetaId is required');
+  }
+
+  if (normalizedChecked === undefined && normalizedPxReviewed === undefined) {
+    throw new Error('At least one of checked or pxReviewed must be provided');
+  }
+
+  const payload = {
+    aiVoiceMetaId: String(aiVoiceMetaId)
+  };
+
+  if (normalizedChecked !== undefined) {
+    payload.Checked = normalizedChecked;
+  }
+
+  if (normalizedPxReviewed !== undefined) {
+    payload.PX_Reviewed = normalizedPxReviewed;
+  }
+
+  const authId = config.AIVOICE_REVIEW_UPDATE_AUTH_ID;
+  const bearerToken = config.AIVOICE_REVIEW_UPDATE_BEARER;
+  const url = `${config.BASE_URL}${config.AIVOICE_DETAIL_UPDATE_PATH}/${authId}`;
+
+  console.log('\n📝 Updating AI Voice review state');
+  console.log(`   Endpoint: ${url}`);
+  console.log(`   aiVoiceMetaId: ${payload.aiVoiceMetaId}`);
+  console.log(`   Checked: ${payload.Checked ?? '(unchanged)'}`);
+  console.log(`   PX_Reviewed: ${payload.PX_Reviewed ?? '(unchanged)'}`);
+
+  try {
+    const response = await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${bearerToken}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000,
+      validateStatus(status) {
+        return status < 500;
+      }
+    });
+
+    console.log(`   Upstream status: ${response.status}`);
+    console.log('   Upstream response:', JSON.stringify(response.data ?? null));
+
+    if (response.status >= 400) {
+      console.error('   Upstream review update failed');
+      return {
+        success: false,
+        statusCode: response.status,
+        error: response.data?.error || response.data?.message || 'Failed to update review status',
+        data: response.data
+      };
+    }
+
+    console.log('   Upstream review update succeeded');
+    return {
+      success: true,
+      statusCode: response.status,
+      data: response.data,
+      requestPayload: payload
+    };
+  } catch (error) {
+    console.error('   Upstream request threw an exception');
+    console.error(`   Upstream status: ${error.response?.status ?? 'no response'}`);
+    console.error('   Upstream response:', JSON.stringify(error.response?.data ?? null));
+    console.error(`   Error message: ${error.message}`);
+    return {
+      success: false,
+      statusCode: error.response?.status,
+      error: error.response?.data?.error || error.response?.data?.message || error.message,
+      data: error.response?.data
+    };
   }
 }
 
@@ -3360,7 +3446,7 @@ async function fetchCallDetails(startDate, endDate, includeTranscript = false, i
     
     console.log(`   âœ… Date validation passed`);
     
-    const url = `${config.BASE_URL}/api/config/get/aivoice/detail`;
+    const url = `${config.BASE_URL}${config.AIVOICE_DETAIL_GET_PATH}`;
     
     console.log(`\nðŸ” Fetching AI Voice call details with pagination...`);
     console.log(`   Endpoint: ${url}`);
@@ -4659,6 +4745,7 @@ module.exports = {
   // Health checks
   testTXQLConnection,
   testAIVoiceConnection,
+  updateAIVoiceReviewStatus,
   
   // License Key Preprocessors (NEW)
   preprocessLicenseKeyFromQuestion,

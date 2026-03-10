@@ -1004,6 +1004,56 @@ app.post('/api/ask', async (req, res) => {
   }
 });
 
+// ==================== REVIEW STATUS ENDPOINTS ====================
+
+app.post('/api/aivoice/review-status', async (req, res) => {
+  try {
+    const { aiVoiceMetaId, checked, pxReviewed } = req.body || {};
+
+    if (!aiVoiceMetaId) {
+      return res.status(400).json({ success: false, error: 'aiVoiceMetaId is required' });
+    }
+
+    if (typeof checked === 'undefined' && typeof pxReviewed === 'undefined') {
+      return res.status(400).json({ success: false, error: 'At least one of checked or pxReviewed must be provided' });
+    }
+
+    const result = await services.updateAIVoiceReviewStatus({
+      aiVoiceMetaId,
+      checked,
+      pxReviewed
+    });
+
+    console.log('   Proxy result:', JSON.stringify({
+      success: result.success,
+      statusCode: result.statusCode ?? null,
+      error: result.error ?? null,
+      upstream: result.data ?? null
+    }));
+
+    if (!result.success) {
+      return res.status(result.statusCode || 500).json({
+        success: false,
+        error: result.error,
+        upstream: result.data || null
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Review status updated successfully',
+      requestPayload: result.requestPayload,
+      upstream: result.data || null
+    });
+  } catch (error) {
+    console.error('Error in /api/aivoice/review-status:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
 // ==================== UTILITY ENDPOINTS ====================
 
 app.get('/api/txql/session', (req, res) => {
