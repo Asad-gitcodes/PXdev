@@ -1008,20 +1008,33 @@ app.post('/api/ask', async (req, res) => {
 
 app.post('/api/aivoice/review-status', async (req, res) => {
   try {
-    const { aiVoiceMetaId, checked, pxReviewed } = req.body || {};
+    const {
+      aiVoiceMetaId,
+      checked,
+      pxReviewed,
+      officeCheckedBy,
+      pxReviewedBy
+    } = req.body || {};
 
     if (!aiVoiceMetaId) {
       return res.status(400).json({ success: false, error: 'aiVoiceMetaId is required' });
     }
 
-    if (typeof checked === 'undefined' && typeof pxReviewed === 'undefined') {
-      return res.status(400).json({ success: false, error: 'At least one of checked or pxReviewed must be provided' });
+    if (
+      typeof checked === 'undefined' &&
+      typeof pxReviewed === 'undefined' &&
+      typeof officeCheckedBy === 'undefined' &&
+      typeof pxReviewedBy === 'undefined'
+    ) {
+      return res.status(400).json({ success: false, error: 'At least one review status or task detail field must be provided' });
     }
 
     const result = await services.updateAIVoiceReviewStatus({
       aiVoiceMetaId,
       checked,
-      pxReviewed
+      pxReviewed,
+      officeCheckedBy,
+      pxReviewedBy
     });
 
     console.log('   Proxy result:', JSON.stringify({

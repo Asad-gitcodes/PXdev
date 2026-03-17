@@ -221,16 +221,35 @@ function normalizeReviewFlag(value) {
   return undefined;
 }
 
-async function updateAIVoiceReviewStatus({ aiVoiceMetaId, checked, pxReviewed }) {
+async function updateAIVoiceReviewStatus({
+  aiVoiceMetaId,
+  checked,
+  pxReviewed,
+  officeCheckedBy,
+  pxReviewedBy,
+}) {
   const normalizedChecked = normalizeReviewFlag(checked);
   const normalizedPxReviewed = normalizeReviewFlag(pxReviewed);
+  const normalizedOfficeCheckedBy =
+    typeof officeCheckedBy === 'string' && officeCheckedBy.trim()
+      ? officeCheckedBy.trim()
+      : undefined;
+  const normalizedPxReviewedBy =
+    typeof pxReviewedBy === 'string' && pxReviewedBy.trim()
+      ? pxReviewedBy.trim()
+      : undefined;
 
   if (!aiVoiceMetaId) {
     throw new Error('aiVoiceMetaId is required');
   }
 
-  if (normalizedChecked === undefined && normalizedPxReviewed === undefined) {
-    throw new Error('At least one of checked or pxReviewed must be provided');
+  if (
+    normalizedChecked === undefined &&
+    normalizedPxReviewed === undefined &&
+    normalizedOfficeCheckedBy === undefined &&
+    normalizedPxReviewedBy === undefined
+  ) {
+    throw new Error('At least one review status or task detail field must be provided');
   }
 
   const payload = {
@@ -245,6 +264,14 @@ async function updateAIVoiceReviewStatus({ aiVoiceMetaId, checked, pxReviewed })
     payload.PX_Reviewed = normalizedPxReviewed;
   }
 
+  if (normalizedOfficeCheckedBy !== undefined) {
+    payload.OfficeCheckedBy = normalizedOfficeCheckedBy;
+  }
+
+  if (normalizedPxReviewedBy !== undefined) {
+    payload.PX_ReviewedBy = normalizedPxReviewedBy;
+  }
+
   const authId = config.AIVOICE_REVIEW_UPDATE_AUTH_ID;
   const bearerToken = config.AIVOICE_REVIEW_UPDATE_BEARER;
   const url = `${config.BASE_URL}${config.AIVOICE_DETAIL_UPDATE_PATH}/${authId}`;
@@ -254,6 +281,8 @@ async function updateAIVoiceReviewStatus({ aiVoiceMetaId, checked, pxReviewed })
   console.log(`   aiVoiceMetaId: ${payload.aiVoiceMetaId}`);
   console.log(`   Checked: ${payload.Checked ?? '(unchanged)'}`);
   console.log(`   PX_Reviewed: ${payload.PX_Reviewed ?? '(unchanged)'}`);
+  console.log(`   OfficeCheckedBy: ${payload.OfficeCheckedBy ?? '(unchanged)'}`);
+  console.log(`   PX_ReviewedBy: ${payload.PX_ReviewedBy ?? '(unchanged)'}`);
 
   try {
     const response = await axios.post(url, payload, {
