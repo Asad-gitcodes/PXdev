@@ -41,7 +41,7 @@ const corsOptions: cors.CorsOptions = {
     ? (origin, cb) => {
         // Allow requests with no origin (server-to-server, curl, etc.)
         if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
-        cb(new Error(`CORS: origin '${origin}' not allowed`));
+        cb(null, false); // reject — browser will see CORS block, not 500
       }
     : true, // allow all when ALLOWED_ORIGINS is not set (local dev)
   credentials: true,
