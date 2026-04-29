@@ -172,6 +172,42 @@ app.get("/jobs", (req, res) => {
   }
 });
 
+// POST /api/aivoice/review-status — proxy to patcon.8px.us
+const REVIEW_UPDATE_URL  = "https://patcon.8px.us/api/config/update/aivoice/detail/YjY4M2VlM2MtMGU5ZS00Y2MxLWI2OWEtYmM2ZmQ0";
+const REVIEW_UPDATE_AUTH = "U0FNTVEzWkpJME5KRk1ZWkxNTlo6WWpZNE0yVmxNMk10TUdVNVpTMDBZMk14TFdJMk9XRXRZbU0yWm1RMA==";
+
+app.post("/api/aivoice/review-status", async (req, res) => {
+  try {
+    const { aiVoiceMetaId, checked, pxReviewed, officeCheckedBy, pxReviewedBy } = req.body ?? {};
+
+    if (!aiVoiceMetaId) {
+      return res.status(400).json({ success: false, error: "aiVoiceMetaId is required" });
+    }
+
+    const payload: Record<string, unknown> = { aiVoiceMetaId: String(aiVoiceMetaId) };
+    if (typeof checked    !== "undefined") payload.Checked     = checked    ? 1 : 0;
+    if (typeof pxReviewed !== "undefined") payload.PX_Reviewed = pxReviewed ? 1 : 0;
+    if (typeof officeCheckedBy === "string" && officeCheckedBy.trim()) payload.OfficeCheckedBy = officeCheckedBy.trim();
+    if (typeof pxReviewedBy    === "string" && pxReviewedBy.trim())    payload.PX_ReviewedBy   = pxReviewedBy.trim();
+
+    const upstream = await fetch(REVIEW_UPDATE_URL, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${REVIEW_UPDATE_AUTH}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await upstream.json().catch(() => null);
+
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({ success: false, error: "Upstream error", upstream: data });
+    }
+
+    res.json({ success: true, message: "Review status updated", upstream: data });
+  } catch (e: any) {
+    res.status(500).json({ success: false, error: e?.message ?? "Internal error" });
+  }
+});
+
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────
 // Render sets $PORT automatically; fall back to EMAIL_AGENT_PORT for local dev.
 const PORT = parseInt(process.env.PORT ?? process.env.EMAIL_AGENT_PORT ?? "8000");
