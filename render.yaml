@@ -1,0 +1,60 @@
+services:
+  - type: web
+    name: px-email-agent
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /config
+
+    # Persistent disk — keeps jobs.db alive across redeploys (paid Render plans).
+    # Remove this block if you are on the free tier.
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # SQLite stored on the persistent disk above.
+      - key: DB_PATH
+        value: /data/jobs.db
+
+      # ── Required — set these in the Render dashboard ──────────────────────
+      - key: PATIENT_API_BASE_URL
+        sync: false
+      - key: PATIENT_API_TOKEN
+        sync: false
+      - key: CLINIC_API_BASE_URL
+        sync: false
+      - key: CLINIC_API_TOKEN
+        sync: false
+      - key: QUERY_API_URL
+        sync: false
+      - key: QUERY_API_TOKEN
+        sync: false
+      - key: EMAIL_API_URL
+        sync: false
+      - key: EMAIL_API_TOKEN
+        sync: false
+      - key: FETCH_LICENSE_KEY
+        sync: false
+      - key: TEST_EMAIL
+        sync: false
+
+      # ── CORS — set to your Netlify URL ────────────────────────────────────
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+      # ── Optional — defaults shown ─────────────────────────────────────────
+      - key: SEND_HOUR
+        value: "20"
+      - key: SEND_MINUTE
+        value: "0"
+      - key: TIMEZONE
+        value: UTC
+      - key: HTTP_TIMEOUT
+        value: "10"
+      - key: EMAIL_MAX_RETRIES
+        value: "3"

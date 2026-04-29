@@ -1,20 +1,15 @@
-# dependencies
 node_modules/
-
-# macOS
-.DS_Store
-
-# env
+dist/
 .env
+.DS_Store
+Thumbs.db
 
-# logs
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-# lockfile (optional)
-# package-lock.json
-
-# OS files
-Thumbs.db
-EOF
