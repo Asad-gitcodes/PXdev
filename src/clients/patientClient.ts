@@ -3,8 +3,18 @@ import type { PatientRecord } from "../processing/filter.js";
 
 const PAGE_SIZE = 100;
 
-async function fetchPage(targetDate: string, page: number, licenseKey = ""): Promise<{ data: any[]; pagination: { totalPages: number } }> {
-  const params = new URLSearchParams({ startDate: targetDate, endDate: targetDate, size: String(PAGE_SIZE), page: String(page) });
+async function fetchPage(
+  startDate: string,
+  endDate: string,
+  page: number,
+  licenseKey = "",
+): Promise<{ data: any[]; pagination: { totalPages: number } }> {
+  const params = new URLSearchParams({
+    startDate,
+    endDate,
+    size: String(PAGE_SIZE),
+    page: String(page),
+  });
   if (licenseKey) params.set("licenseKey", licenseKey);
   const res = await fetch(`${settings.patientApiBaseUrl}?${params}`, {
     headers: { Authorization: `Bearer ${settings.patientApiToken}` },
@@ -36,10 +46,18 @@ function parseRecord(raw: Record<string, unknown>): PatientRecord {
 }
 
 export async function getPatientRecords(targetDate: string, licenseKey = ""): Promise<PatientRecord[]> {
+  return getPatientRecordsForRange(targetDate, targetDate, licenseKey);
+}
+
+export async function getPatientRecordsForRange(
+  startDate: string,
+  endDate: string,
+  licenseKey = "",
+): Promise<PatientRecord[]> {
   const all: PatientRecord[] = [];
   let page = 1;
   while (true) {
-    const raw = await fetchPage(targetDate, page, licenseKey);
+    const raw = await fetchPage(startDate, endDate, page, licenseKey);
     const items: unknown[] = raw.data ?? [];
     for (const item of items) {
       try { all.push(parseRecord(item as Record<string, unknown>)); } catch { /* skip bad record */ }

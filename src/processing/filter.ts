@@ -46,16 +46,27 @@ export function filterRecordsForDay(
 ): PatientRecord[] {
   if (!records.length) return [];
   const report = reportDateStr(targetDate);
+  return filterRecordsForRange(records, report, report, timezone);
+}
+
+export function filterRecordsForRange(
+  records: PatientRecord[],
+  startDate: string,
+  endDate: string,
+  timezone = "UTC"
+): PatientRecord[] {
+  if (!records.length) return [];
   return records.filter((r) => {
     // Prefer startTime — the API stores it in clinic local time and uses it for
     // its own startDate/endDate filtering, so it's always the correct date.
     const startTimeDate = parseDateFromStartTime(r["startTime"]);
-    if (startTimeDate) return startTimeDate === report;
+    if (startTimeDate) return startTimeDate >= startDate && startTimeDate <= endDate;
 
     // Fall back to createdAt converted to the configured timezone.
     if (!r.created_at) return false;
     try {
-      return localDateStr(new Date(r.created_at), timezone) === report;
+      const createdDate = localDateStr(new Date(r.created_at), timezone);
+      return createdDate >= startDate && createdDate <= endDate;
     } catch {
       return false;
     }

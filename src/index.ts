@@ -12,7 +12,9 @@ import {
   getClinicsStatus,
   previewClinic,
   sendClinic,
+  sendClinicMonthly,
   sendAll,
+  sendAllMonthly,
 } from "./pipeline.js";
 import {
   getSchedulerState,
@@ -87,7 +89,7 @@ app.post("/scheduler/trigger", async (req, res) => {
   batches.set(batchId, { status: "running", results: [] });
 
   sendAll(target_date, "scheduler").then(results => {
-    batches.set(batchId, { status: "done", results });
+    batches.set(batchId, { status: "complete", results });
   }).catch(e => {
     batches.set(batchId, { status: "failed", results: [{ error: String(e?.message ?? e) }] });
   });
@@ -134,6 +136,24 @@ app.post("/clinics/:licenseKey/send", async (req, res) => {
   }
 });
 
+// POST /clinics/:licenseKey/send/monthly
+app.post("/clinics/:licenseKey/send/monthly", async (req, res) => {
+  try {
+    const { month_start, month_end, target_date, override_email } = req.body ?? {};
+    const result = await sendClinicMonthly(
+      req.params.licenseKey,
+      month_start,
+      month_end,
+      target_date,
+      "manual",
+      override_email,
+    );
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ detail: e?.message ?? "Internal error" });
+  }
+});
+
 // POST /send-all
 app.post("/send-all", async (req, res) => {
   const { target_date, override_email } = req.body ?? {};
@@ -141,7 +161,22 @@ app.post("/send-all", async (req, res) => {
   batches.set(batchId, { status: "running", results: [] });
 
   sendAll(target_date, "manual", override_email).then(results => {
-    batches.set(batchId, { status: "done", results });
+    batches.set(batchId, { status: "complete", results });
+  }).catch(e => {
+    batches.set(batchId, { status: "failed", results: [{ error: String(e?.message ?? e) }] });
+  });
+
+  res.json({ batch_id: batchId, status: "running" });
+});
+
+// POST /send-all/monthly
+app.post("/send-all/monthly", async (req, res) => {
+  const { month_start, month_end, target_date, override_email } = req.body ?? {};
+  const batchId = randomUUID();
+  batches.set(batchId, { status: "running", results: [] });
+
+  sendAllMonthly(month_start, month_end, target_date, "manual", override_email).then(results => {
+    batches.set(batchId, { status: "complete", results });
   }).catch(e => {
     batches.set(batchId, { status: "failed", results: [{ error: String(e?.message ?? e) }] });
   });

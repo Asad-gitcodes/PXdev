@@ -30,13 +30,25 @@ LEFT  JOIN claimproc   cp  ON cp.ProcNum=pl.ProcNum
 LEFT  JOIN procedurecode prc ON prc.CodeNum=pl.CodeNum
 LEFT  JOIN definition  def ON def.DefNum=prc.ProcCat
 WHERE ha.Note LIKE '%PX Voice%' AND ha.HistApptAction=0
-  AND DATE(ha.HistDateTStamp)='{report_date}'
+  AND {date_filter}
 GROUP BY ha.AptNum ORDER BY 4 DESC LIMIT 1500
 `.trim();
 
 export async function getAppointments(licenseKey: string, reportDate: string): Promise<Record<string, unknown>[]> {
+  return getAppointmentsForRange(licenseKey, reportDate, reportDate);
+}
+
+export async function getAppointmentsForRange(
+  licenseKey: string,
+  startDate: string,
+  endDate: string,
+): Promise<Record<string, unknown>[]> {
   try {
-    const query = QUERY.replace("{report_date}", reportDate);
+    const dateFilter =
+      startDate === endDate
+        ? `DATE(ha.HistDateTStamp)='${startDate}'`
+        : `DATE(ha.HistDateTStamp) BETWEEN '${startDate}' AND '${endDate}'`;
+    const query = QUERY.replace("{date_filter}", dateFilter);
     const res = await fetch(settings.queryApiUrl, {
       method: "POST",
       headers: { Authorization: settings.queryApiToken, "Content-Type": "application/json" },
