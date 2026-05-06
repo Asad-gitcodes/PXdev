@@ -11,6 +11,7 @@ import { settings } from "./config.js";
 import {
   getClinicsStatus,
   previewClinic,
+  previewClinicMonthly,
   sendClinic,
   sendClinicMonthly,
   sendAll,
@@ -114,6 +115,24 @@ app.get("/clinics/:licenseKey/preview", async (req, res) => {
   try {
     const targetDate = String(req.query.target_date ?? "").trim() || undefined;
     const preview = await previewClinic(req.params.licenseKey, targetDate);
+    res.json(preview);
+  } catch (e: any) {
+    res.status(500).json({ detail: e?.message ?? "Internal error" });
+  }
+});
+
+// GET /clinics/:licenseKey/preview/monthly
+app.get("/clinics/:licenseKey/preview/monthly", async (req, res) => {
+  try {
+    const monthStart = String(req.query.month_start ?? "").trim() || undefined;
+    const monthEnd = String(req.query.month_end ?? "").trim() || undefined;
+    const targetDate = String(req.query.target_date ?? "").trim() || undefined;
+    const preview = await previewClinicMonthly(
+      req.params.licenseKey,
+      monthStart,
+      monthEnd,
+      targetDate,
+    );
     res.json(preview);
   } catch (e: any) {
     res.status(500).json({ detail: e?.message ?? "Internal error" });

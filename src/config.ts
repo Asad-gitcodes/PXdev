@@ -18,6 +18,7 @@ export const settings = {
   testEmail:         process.env.TEST_EMAIL          ?? "",
   httpTimeout:       parseInt(process.env.HTTP_TIMEOUT  ?? "10") * 1000,
   timezone:          process.env.TIMEZONE             ?? "UTC",
+  schedulerTimezone: process.env.SCHEDULER_TIMEZONE   ?? "America/Los_Angeles",
   sendHour:          parseInt(process.env.SEND_HOUR   ?? "20"),
   sendMinute:        parseInt(process.env.SEND_MINUTE ?? "0"),
 };
