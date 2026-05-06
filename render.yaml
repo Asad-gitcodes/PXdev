@@ -48,8 +48,10 @@ services:
         sync: false
 
       # ── Optional — defaults shown ─────────────────────────────────────────
+      - key: SCHEDULER_TIMEZONE
+        value: America/Los_Angeles
       - key: SEND_HOUR
-        value: "20"
+        value: "3"
       - key: SEND_MINUTE
         value: "0"
       - key: TIMEZONE
