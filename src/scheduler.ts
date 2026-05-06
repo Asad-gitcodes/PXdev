@@ -3,6 +3,12 @@ import * as db from "./db.js";
 import { broadcaster } from "./logStream.js";
 import { sendAll } from "./pipeline.js";
 
+type SchedulerConfig = {
+  timeZone: string;
+  hour: number;
+  minute: number;
+};
+
 function getZonedParts(date: Date, timeZone: string) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
@@ -38,28 +44,75 @@ function findNextRun(now: Date, timeZone: string, hour: number, minute: number):
   return new Date(now.getTime() + 24 * 60 * 60_000);
 }
 
+function clampInteger(value: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+export function getSchedulerConfig(): SchedulerConfig {
+  return {
+    timeZone:
+      db.getSetting("scheduler_timezone", "").trim() ||
+      settings.schedulerTimezone,
+    hour: clampInteger(
+      db.getSetting("scheduler_send_hour", ""),
+      settings.sendHour,
+      0,
+      23,
+    ),
+    minute: clampInteger(
+      db.getSetting("scheduler_send_minute", ""),
+      settings.sendMinute,
+      0,
+      59,
+    ),
+  };
+}
+
+export function setSchedulerConfig(next: Partial<SchedulerConfig>): SchedulerConfig {
+  const current = getSchedulerConfig();
+  const merged = {
+    timeZone: next.timeZone?.trim() || current.timeZone,
+    hour:
+      typeof next.hour === "number"
+        ? Math.min(23, Math.max(0, Math.trunc(next.hour)))
+        : current.hour,
+    minute:
+      typeof next.minute === "number"
+        ? Math.min(59, Math.max(0, Math.trunc(next.minute)))
+        : current.minute,
+  };
+
+  db.setSetting("scheduler_timezone", merged.timeZone);
+  db.setSetting("scheduler_send_hour", String(merged.hour));
+  db.setSetting("scheduler_send_minute", String(merged.minute));
+  return merged;
+}
+
 export function getSchedulerState() {
   const isPaused     = db.getSetting("scheduler_paused", "false") === "true";
   const lastRunDate  = db.getSetting("scheduler_last_date", "");
   const lastRunStatus = db.getSetting("scheduler_last_status", "");
+  const schedulerConfig = getSchedulerConfig();
 
   const now = new Date();
   const next = findNextRun(
     new Date(now.getTime() + 60_000),
-    settings.schedulerTimezone,
-    settings.sendHour,
-    settings.sendMinute,
+    schedulerConfig.timeZone,
+    schedulerConfig.hour,
+    schedulerConfig.minute,
   );
 
   const countdownSeconds = Math.max(0, Math.floor((next.getTime() - now.getTime()) / 1000));
-  const nowParts = getZonedParts(now, settings.schedulerTimezone);
-  const nextParts = getZonedParts(next, settings.schedulerTimezone);
+  const nowParts = getZonedParts(now, schedulerConfig.timeZone);
+  const nextParts = getZonedParts(next, schedulerConfig.timeZone);
   const isToday = nextParts.localDate === nowParts.localDate;
   const timeLabel = next.toLocaleTimeString("en-US", {
     hour: "numeric",
     minute: "2-digit",
     hour12: true,
-    timeZone: settings.schedulerTimezone,
+    timeZone: schedulerConfig.timeZone,
     timeZoneName: "short",
   });
 
@@ -92,11 +145,12 @@ export function startSchedulerLoop(): void {
       const state = getSchedulerState();
       if (state.is_paused) return;
 
+      const schedulerConfig = getSchedulerConfig();
       const now = new Date();
-      const zoned = getZonedParts(now, settings.schedulerTimezone);
+      const zoned = getZonedParts(now, schedulerConfig.timeZone);
       if (
-        zoned.hour === settings.sendHour &&
-        zoned.minute === settings.sendMinute &&
+        zoned.hour === schedulerConfig.hour &&
+        zoned.minute === schedulerConfig.minute &&
         lastFiredLocalDate !== zoned.localDate
       ) {
         lastFiredLocalDate = zoned.localDate;

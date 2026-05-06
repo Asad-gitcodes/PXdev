@@ -18,7 +18,9 @@ import {
   sendAllMonthly,
 } from "./pipeline.js";
 import {
+  getSchedulerConfig,
   getSchedulerState,
+  setSchedulerConfig,
   setPaused,
   startSchedulerLoop,
 } from "./scheduler.js";
@@ -57,10 +59,11 @@ app.use(express.json());
 
 // GET /config
 app.get("/config", (_req, res) => {
+  const schedulerConfig = getSchedulerConfig();
   res.json({
-    send_hour:         settings.sendHour,
-    send_minute:       settings.sendMinute,
-    timezone:          settings.timezone,
+    send_hour:         schedulerConfig.hour,
+    send_minute:       schedulerConfig.minute,
+    timezone:          schedulerConfig.timeZone,
     fetch_license_key: settings.fetchLicenseKey,
     test_email:        settings.testEmail,
   });
@@ -68,6 +71,17 @@ app.get("/config", (_req, res) => {
 
 // GET /scheduler
 app.get("/scheduler", (_req, res) => {
+  res.json(getSchedulerState());
+});
+
+// POST /scheduler
+app.post("/scheduler", (req, res) => {
+  const { send_hour, send_minute, timezone } = req.body ?? {};
+  setSchedulerConfig({
+    hour: typeof send_hour === "number" ? send_hour : undefined,
+    minute: typeof send_minute === "number" ? send_minute : undefined,
+    timeZone: typeof timezone === "string" ? timezone : undefined,
+  });
   res.json(getSchedulerState());
 });
 
